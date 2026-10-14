@@ -11,7 +11,7 @@
 
 ## 시작하기 — 앱을 만들던 세션에 이렇게 말하세요
 
-> 디자인 스튜디오 써 줘. https://github.com/tutleblue/claude-code-designtool 의 `skill/design-studio/SKILL.md` 를 따라 줘.
+> 디자인 스튜디오 써 줘. https://github.com/tutleblue/claude-code-designtool 의 `skill/tutleblue-design-studio/SKILL.md` 를 따라 줘.
 
 Claude가 하는 일:
 1. 도구를 `~/.claude/design-studio/tool`로 받습니다.
@@ -25,7 +25,7 @@ Claude가 하는 일:
 
 그다음부터는 같은 세션이나 같은 프로젝트에서 "스튜디오 열어 줘", "저장본 반영해 줘", "시안 반영해 줘"라고 말하면 됩니다.
 
-### 모든 프로젝트에서 `/design-studio`로 쓰기 (선택)
+### 모든 프로젝트에서 `/tutleblue-design-studio`로 쓰기 (선택)
 
 ```bash
 # macOS · Linux
@@ -88,7 +88,7 @@ python tests/run.py   # 예제 앱(examples/hello)으로 24개 항목
 
 | 경로 | 내용 |
 |---|---|
-| `skill/design-studio/SKILL.md` | 시작 스킬 (세션에 넣거나 `~/.claude/skills`에 설치) |
+| `skill/tutleblue-design-studio/SKILL.md` | 시작 스킬 (세션에 넣거나 `~/.claude/skills`에 설치) |
 | `skill/GUIDE.md` | Claude용 안내서: 개인화·열기·저장본 반영·시안 모드·업데이트 |
 | `run_studio.py` | 어디서든 부르는 입구 |
 | `studio/` | `server.py`(셸·프록시·API), `config.py`, `init.py`(앱 분석), `doctor.py`(점검), `proposals.py`(시안), `ai.py`, `snapshot.py`, `assets/`(편집 도구·글꼴 OFL) |
