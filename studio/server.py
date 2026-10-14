@@ -78,9 +78,9 @@ SHELL_HTML = """<!doctype html>
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(prog="studio", description="디자인 스튜디오")
-    ap.add_argument("--app", default="studio.app.json", help="앱 설정 파일 (기본: 지금 폴더의 studio.app.json)")
-    ap.add_argument("--project", default="", help="앱 저장소 폴더 (기본: 설정의 project, 없으면 설정 파일 폴더)")
+    ap = argparse.ArgumentParser(prog="studio open", description="디자인 스튜디오 띄우기")
+    ap.add_argument("--project", default="", help="앱 저장소 폴더 (기본: 지금 폴더). 그 안의 .claude/design-studio/studio.app.json 을 쓴다")
+    ap.add_argument("--app", default="", help="앱 설정 파일을 따로 줄 때")
     ap.add_argument("--mode", default="", help="설정의 modes 중 하나 (기본: 첫 번째)")
     ap.add_argument("--port", type=int, default=int(os.environ.get("STUDIO_PORT", "8796")))
     ap.add_argument("--no-open", action="store_true", help="브라우저를 자동으로 열지 않음")
@@ -262,7 +262,7 @@ def build_handler(st: Studio):
                     return self._send(body, headers.get("content-type", "text/plain"), status)
                 html = body.decode("utf-8", errors="replace")
             info = {"mode": cfg.mode, "modes": cfg.modes, "app": cfg.name, "version": VERSION, "requests": cfg.rel(cfg.requests_dir),
-                    "ctx": "" if st.override else self._context(), "claude": st.claude_ok, "snapshot": st.args.snapshot}
+                    "ctx": "" if st.override else self._context(), "claude": st.claude_ok, "proposals": cfg.proposals, "snapshot": st.args.snapshot}
             head = ('<link rel="stylesheet" href="/__studio/studio-fonts.css" />\n'
                     '<link rel="stylesheet" href="/__studio/studio.css" />\n')
             # 앱 스크립트가 다 돈 뒤 붙도록 body 끝에, defer 로 (defer 끼리는 문서 순서대로 돈다)
@@ -372,6 +372,8 @@ def build_handler(st: Studio):
             request = Path(str(payload.get("request") or "")).name
             pm = st.proposals
             try:
+                if action in ("start", "revise") and not cfg.proposals:
+                    raise ValueError("이 앱은 시안을 만들지 않게 설정돼 있어요. 저장본을 Claude Code 에 넘겨 주세요.")
                 if action in ("start", "revise") and not (request and (cfg.requests_dir / f"{request}.json").is_file()):
                     raise ValueError("저장본을 못 찾았어요.")
                 if action == "start":
@@ -486,9 +488,10 @@ class ExclusiveServer(ThreadingHTTPServer):
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    if not Path(args.app).is_file():
-        sys.exit(f"앱 설정 파일이 없어요: {args.app}  (--app 으로 studio.app.json 을 알려 주세요)")
-    cfg = appconfig.load(args.app, args.project or None, args.mode or None)
+    app = Path(args.app) if args.app else appconfig.find_app_config(args.project or ".")
+    if not app or not app.is_file():
+        sys.exit("이 앱의 스튜디오 설정이 없어요. 먼저 `python -m studio init --project <앱 저장소>` 로 만들고 다듬어 주세요.")
+    cfg = appconfig.load(app, args.project or None, args.mode or None)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # 끌 때도 앱 서버를 함께 끄게 (atexit)
     if not args.snapshot:
         appconfig.write_session(cfg)

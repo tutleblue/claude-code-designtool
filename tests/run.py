@@ -225,6 +225,26 @@ def snapshot_check(name: str) -> None:
     check("사진: now·target 찍힘", len(shots) >= 2, ", ".join(s.name for s in shots) or ok.stdout[-200:] + ok.stderr[-200:])
 
 
+def init_doctor_check() -> None:
+    """화면 폴더만 있는 새 앱에 init → doctor 가 실패 없이 도는지 (개인화 흐름의 뼈대)."""
+    tmp = Path(tempfile.mkdtemp(prefix="studio-init-"))
+    try:
+        shutil.copytree(HELLO / "web", tmp / "web")
+        (tmp / ".gitignore").write_text(".design-studio/\n", encoding="utf-8")
+        r = subprocess.run([sys.executable, str(ROOT / "run_studio.py"), "init", "--project", str(tmp)],
+                           capture_output=True, text=True, encoding="utf-8")
+        cfg = tmp / ".claude/design-studio/studio.app.json"
+        data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.is_file() else {}
+        check("init: 정적 앱 초안 (serve static·webRoot·테마 2개)", r.returncode == 0 and data.get("serve") == "static"
+              and data.get("webRoot") == "web" and "dark" in (tmp / ".claude/design-studio/studio.app.js").read_text(encoding="utf-8"),
+              r.stderr[-200:])
+        r = subprocess.run([sys.executable, str(ROOT / "run_studio.py"), "doctor", "--project", str(tmp), "--port", "8981"],
+                           capture_output=True, text=True, encoding="utf-8", timeout=240)
+        check("doctor: 실패 0", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[-200:])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> None:
     if WORK.exists():
         shutil.rmtree(WORK)
@@ -242,6 +262,7 @@ def main() -> None:
     apply_checks()
     if name:
         snapshot_check(name)
+    init_doctor_check()
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} 통과")
     sys.exit(1 if failed else 0)

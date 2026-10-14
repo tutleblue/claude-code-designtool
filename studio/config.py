@@ -5,6 +5,8 @@ Claude 에게 알려 줄 앱 규칙)은 전부 이 설정 하나에 적는다.
 
     {
       "name": "Hello",                       # 화면 맨 위·요청 글에 쓰는 앱 이름
+      "project": "../..",                    # 설정 파일 기준 앱 저장소 (앱 저장소의 .claude/design-studio/ 에 두면 ../..)
+      "studioVersion": "0.2.0",              # 이 설정을 만든 스튜디오 판 (더 새 판이 필요하면 알려 준다)
       "webRoot": "web",                      # 프로젝트 기준 화면 파일 폴더 (시안은 이 폴더의 글자 파일을 복사해 고친다)
       "workDir": ".design-studio",           # 프로젝트 기준 저장본·시안 폴더 (대상 저장소의 .gitignore 에 넣는다)
       "context": "studio/context.md",        # 설정 파일 기준. Claude 에게 줄 앱 규칙 (짧게)
@@ -25,6 +27,9 @@ Claude 에게 알려 줄 앱 규칙)은 전부 이 설정 하나에 적는다.
 
 자리표: {python} 스튜디오를 띄운 파이썬, {venv_python} 앱 저장소의 .venv 파이썬(없으면 {python}), {project} 프로젝트 폴더, {config_dir} 설정 파일 폴더, {port} 앱에 줄 빈 포트,
 {studio} 스튜디오 저장소 폴더. launch 대신 "upstream": "http://127.0.0.1:5173" 처럼 이미 떠 있는 앱 주소를 적어도 된다.
+서버가 없는 정적 화면이면 "serve": "static" 만 적는다 (스튜디오가 webRoot 를 직접 띄운다).
+
+설정은 보통 앱 저장소의 .claude/design-studio/studio.app.json 에 둔다 (ADAPTER_REL). 그러면 --project 만 주면 찾는다.
 
 요청 규칙 (메서드 경로, 경로는 * 와일드카드):
   deny  → 403 (그 모드에서 절대 앱에 닿으면 안 되는 것)
@@ -36,12 +41,32 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import re
 import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 STUDIO_HOME = Path(__file__).resolve().parent.parent
+ADAPTER_DIR = Path(".claude") / "design-studio"
+ADAPTER_REL = ADAPTER_DIR / "studio.app.json"
+try:
+    STUDIO_VERSION = (STUDIO_HOME / "VERSION").read_text(encoding="utf-8").strip()
+except OSError:
+    STUDIO_VERSION = "0"
+
+
+def _ver(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3]) or (0,)
+
+
+def find_app_config(project: str | Path) -> Path | None:
+    """앱 저장소에서 개인화 설정을 찾는다 (.claude/design-studio/studio.app.json, 없으면 루트의 studio.app.json)."""
+    proj = Path(project).resolve()
+    for cand in (proj / ADAPTER_REL, proj / "studio.app.json"):
+        if cand.is_file():
+            return cand
+    return None
 
 
 @dataclass
@@ -61,6 +86,7 @@ class AppConfig:
     mocks: dict[str, object] = field(default_factory=dict)
     denies: list[str] = field(default_factory=list)
     modes: list[str] = field(default_factory=list)
+    proposals: bool = True  # 시안(복사본 고치기). 번들러 앱처럼 URL 과 파일이 1:1 이 아니면 false
 
     @property
     def requests_dir(self) -> Path:
@@ -135,18 +161,25 @@ def load(config_path: str | Path, project: str | Path | None, mode: str | None) 
         context_path=(base / data["context"]).resolve() if data.get("context") else None,
         client_path=(base / data["client"]).resolve() if data.get("client") else None,
         checks=list(data.get("checks") or []),
-        launch=list(m.get("launch") or data.get("launch") or []),
+        launch=list(m.get("launch") or data.get("launch") or [])
+        or (["{python}", "-m", "http.server", "{port}", "--bind", "127.0.0.1", "--directory", "{web_root}"]
+            if (m.get("serve") or data.get("serve")) == "static" else []),
         upstream=str(m.get("upstream") or data.get("upstream") or ""),
         passes=list(shared.get("pass") or []) + list(own.get("pass") or []),
         mocks={**(shared.get("mock") or {}), **(own.get("mock") or {})},
         denies=list(shared.get("deny") or []) + list(own.get("deny") or []),
+        proposals=bool(data.get("proposals", True)),
     )
     if cfg.web_root == cfg.project or cfg.project not in cfg.web_root.parents:
         sys.exit("webRoot 는 프로젝트 안의 하위 폴더여야 해요 (예: \"web\", \"public\"). 시안 권한을 그 폴더로만 좁히기 때문이에요.")
     if cfg.project not in cfg.work_dir.parents or cfg.web_root in cfg.work_dir.parents or cfg.work_dir == cfg.web_root:
         sys.exit("workDir 는 프로젝트 안, 화면 폴더 밖이어야 해요 (기본 .design-studio).")
     if not cfg.launch and not cfg.upstream:
-        sys.exit("설정에 launch(앱을 띄우는 명령)나 upstream(이미 떠 있는 앱 주소) 중 하나는 있어야 해요.")
+        sys.exit("설정에 launch(앱을 띄우는 명령)·upstream(이미 떠 있는 앱 주소)·\"serve\": \"static\" 중 하나는 있어야 해요.")
+    need = str(data.get("studioVersion") or "")
+    if need and _ver(need) > _ver(STUDIO_VERSION):
+        print(f"[알림] 이 앱 설정은 스튜디오 {need} 로 만들었어요. 지금 스튜디오는 {STUDIO_VERSION} 이에요. "
+              "스튜디오를 새로 받아 주세요 (git pull).", file=sys.stderr)
     return cfg
 
 
@@ -160,7 +193,8 @@ def venv_python(project: Path) -> str:
 
 def fill_launch(cfg: AppConfig, port: int) -> list[str]:
     values = {"python": sys.executable, "venv_python": venv_python(cfg.project), "project": str(cfg.project),
-              "config_dir": str(cfg.path.parent), "port": str(port), "studio": str(STUDIO_HOME)}
+              "config_dir": str(cfg.path.parent), "port": str(port), "studio": str(STUDIO_HOME),
+              "web_root": str(cfg.web_root)}
     return [_fill(part, values) for part in cfg.launch]
 
 

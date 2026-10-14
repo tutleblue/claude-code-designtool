@@ -653,7 +653,7 @@
     cancelled: ["멈춤", "bad"], applied: ["반영함", "done"], discarded: ["버림", "done"],
   };
   function proposalsHtml() {
-    const intro = INFO.claude
+    const intro = INFO.claude && INFO.proposals !== false
       ? `<p class="small">저장할 때 <b>저장하고 시안 만들기</b>를 누르면 Claude 가 진짜 화면 파일은 그대로 두고 복사본(시안)에만 고쳐요. 시안을 보고 반영할지 정하세요.</p>`
       : `<p class="small">이 컴퓨터에서 <code>claude</code> 명령을 못 찾아 시안을 자동으로 만들 수 없어요. Claude Code 를 설치하면 여기서 바로 시안을 받아 볼 수 있어요. 지금은 저장본을 Claude Code 에 직접 넘겨 주세요.</p>`;
     if (!S.proposals.length) return `<div class="empty">${intro}</div>`;
@@ -1996,10 +1996,10 @@
         <button data-freedom="exact" class="${S.freedom === "exact" ? "on" : ""}">적은 그대로만</button>
       </div>
       <div class="macts"><button data-modal="close">닫기</button>${
-        !INFO.claude ? `<button class="primary" data-modal="save">저장</button>`
+        !INFO.claude || INFO.proposals === false ? `<button class="primary" data-modal="save">저장</button>`
         : INFO.ctx ? `<button class="primary" data-modal="save-revise">저장하고 다시 고치기</button>`
         : `<button data-modal="save">저장만</button><button class="primary" data-modal="save-propose">저장하고 시안 만들기</button>`}</div>
-      ${INFO.claude && !INFO.ctx ? `<p class="small">시안: Claude 가 진짜 화면 파일은 그대로 두고 복사본에 고쳐요. 다 되면 원래·시안을 오가며 보고 반영할지 정해요.</p>` : ""}
+      ${INFO.claude && INFO.proposals !== false && !INFO.ctx ? `<p class="small">시안: Claude 가 진짜 화면 파일은 그대로 두고 복사본에 고쳐요. 다 되면 원래·시안을 오가며 보고 반영할지 정해요.</p>` : ""}
       <div class="result" hidden></div></div>`;
     m.hidden = false;
     m.querySelector("[data-f=title]").focus();
