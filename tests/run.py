@@ -87,6 +87,16 @@ def browser_checks(url: str) -> None:
         size = fr.evaluate("() => getComputedStyle(document.querySelector('.title')).fontSize")
         check("고른 요소의 글자 크기 바꾸기", size == "30px", size)
 
+        # 오른쪽 단추 메뉴 → 글자 크게 (+2px), 메뉴 밖 누르기는 메뉴만 닫음
+        pg.mouse.click(box["x"] + 10, box["y"] + 8, button="right")
+        pg.wait_for_timeout(200)
+        items = pg.evaluate(f"() => [...{host}.querySelectorAll('.cmenu:not([hidden]) [data-cm]')].map(b => b.dataset.cm)")
+        pg.evaluate(f"() => {host}.querySelector('[data-cm=bigger]').click()")
+        pg.wait_for_timeout(300)
+        size_m = fr.evaluate("() => getComputedStyle(document.querySelector('.title')).fontSize")
+        check("오른쪽 단추 메뉴: 뜸·글자 크게", {"select", "comment", "bigger", "revert"} <= set(items) and size_m == "32px", f"{len(items)}개, {size_m}")
+        pg.keyboard.press("Control+z")
+        pg.wait_for_timeout(200)
         # 댓글
         pg.keyboard.press("c")
         hb = app.locator(".hint").bounding_box()

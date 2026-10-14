@@ -394,7 +394,7 @@
     if (i < 0) return;
     const [c] = list.splice(i, 1);
     if (isDom(c)) revertDom(c);
-    S.undo.push({ op: "remove", vid: cur().id, change: c, index: i });
+    S.undo.push({ op: "remove", vid: cur().id, change: c, index: i, group: S.group });
     S.redo = [];
     applyCss();
     saveDraftSoon();
@@ -514,9 +514,9 @@
       <div class="hover" hidden><span class="tag"></span></div>
       <div class="selbox" hidden>
         <span class="tag"></span>
-        <button class="grip" title="끌어서 형제 사이 순서 바꾸기">⠿ 순서</button>
-        <button class="scopechip" title="누르면 '같은 모양 모두' ↔ '이것만'"></button>
-        <span class="resize" title="끌어서 크기 바꾸기 (글자는 글자 크기, 아이콘은 비율대로, 상자는 너비·높이 · Ctrl: 상자처럼)"></span>
+        <button class="grip" title="끌어서 순서 바꾸기">⠿ 순서</button>
+        <button class="scopechip" title="같은 모양 모두 ↔ 이것만"></button>
+        <span class="resize" title="끌어서 크기 (Ctrl: 상자로)"></span>
       </div>
       <div class="dropline" hidden></div>
       <div class="drag-rect" hidden></div>
@@ -532,11 +532,12 @@
       <div class="ptitle"></div>
       <div class="sv"><i class="knob"></i></div>
       <div class="hue"><i class="knob"></i></div>
-      <div class="prow"><span class="pfrom" title="처음 색 (누르면 되돌리기)" data-pick-from></span><span class="pv"></span>
-        <input class="phex" maxlength="7" spellcheck="false"><button data-pick-eye title="화면 어디서든 색 따오기 (앱 밖도)">스포이트</button></div>
+      <div class="prow"><span class="pfrom" title="처음 색으로" data-pick-from></span><span class="pv"></span>
+        <input class="phex" maxlength="7" spellcheck="false"><button data-pick-eye title="화면 어디서든 색 따오기">스포이트</button></div>
       <div class="prow end"><button data-pick-close>다 됐어요</button></div>
     </div>
     <div class="pop" hidden></div>
+    <div class="cmenu" role="menu" hidden></div>
     <div class="modal" hidden></div>
     <div class="toast" hidden></div>`;
   const $ = (sel) => root.querySelector(sel);
@@ -562,17 +563,17 @@
         ${mode("comment", "댓글", "C", "✎")}
       </div>
       <div class="grp">
-        <button class="icon" data-act="undo" title="되돌리기 (Ctrl+Z)">↶</button>
-        <button class="icon" data-act="redo" title="다시 하기 (Ctrl+Shift+Z)">↷</button>
+        <button class="icon" data-act="undo" title="되돌리기 Ctrl+Z">↶</button>
+        <button class="icon" data-act="redo" title="다시 하기 Ctrl+Shift+Z">↷</button>
         ${INFO.claude ? `<button class="icon ai-btn" data-ai="open" title="AI 추천">✨</button>` : ""}
       </div>
-      <div class="grp variants" title="조합마다 따로 바꿔 보고 숫자 키(1~9)로 오가며 비교해요">
+      <div class="grp variants" title="조합 비교 · 숫자 키">
         ${S.variants.map((v, i) => `<button class="vpill ${i === S.active ? "on" : ""}" data-variant="${i}" title="${esc(v.name)} · 바꾼 것 ${v.changes.length}">${esc(v.name.replace(/^조합\s*/, "")) || i + 1}</button>`).join("")}
-        <button class="icon" data-act="variant-dup" title="지금 조합을 복사해 새 조합 만들기">＋</button>
+        <button class="icon" data-act="variant-dup" title="조합 복사">＋</button>
       </div>
       <div class="grp">
         <button class="save" data-act="save">${INFO.ctx ? "이 시안 더 고쳐 달라기" : "저장해서 Claude에게"}</button>
-        <button class="icon" data-act="toggle-panel" title="패널 접기/펴기">${S.collapsed ? "◧" : "◨"}</button>
+        <button class="icon" data-act="toggle-panel" title="패널 접기">${S.collapsed ? "◧" : "◨"}</button>
       </div>
       ${ctxPill()}
       <div class="hint">${esc(hintText())}</div>`;
@@ -597,10 +598,10 @@
     host.style.setProperty("--barh", `${(bar && !bar.hidden && bar.offsetHeight) || 0}px`);
   }
   function hintText() {
-    if (INFO.ctx && S.mode === "browse") return "Claude 가 만든 시안이에요 · 마음에 안 드는 곳에 댓글을 달고 '더 고쳐 달라기', 좋으면 시안 탭에서 '이대로 반영'";
-    if (S.mode === "select") return "누르면 골라져요 · 두 번 누르면 글자 고치기 · ↑ 바깥 상자 · Alt+누르기는 앱이 그대로 받아요";
-    if (S.mode === "comment") return "누르면 그 자리에, 끌면 그 영역에 댓글 · Alt+누르기는 앱이 그대로 받아요";
-    return `앱처럼 눌러서 화면을 옮겨 다녀요 · ${INFO.mode === "real" ? "내 데이터(읽기만)" : "연습용 가짜 데이터"} · 실제로는 아무것도 보내지 않아요`;
+    if (INFO.ctx && S.mode === "browse") return "시안 보는 중 · 댓글 달고 '더 고쳐 달라기' · 좋으면 시안 탭에서 반영";
+    if (S.mode === "select") return "누르기 고르기 · 두 번 글자 · ↑ 바깥 상자 · 오른쪽 단추 메뉴";
+    if (S.mode === "comment") return "누르기 댓글 · 끌기 영역 댓글 · 오른쪽 단추 메뉴";
+    return `앱처럼 써 보기 · 오른쪽 단추 메뉴 · ${INFO.mode === "real" ? "내 데이터, 읽기만" : "연습용 데이터"}`;
   }
 
   /* ----- 오른쪽 패널 ----- */
@@ -633,7 +634,7 @@
     panel.innerHTML = `
       <header>
         <div class="brand">디자인 스튜디오 <small>${esc(INFO.app || "")} · ${INFO.mode === "real" ? "내 데이터 · 읽기만" : "연습용"}${INFO.version ? ` · v${esc(INFO.version)}` : ""}</small></div>
-        <button class="icon" data-act="swap-side" title="패널을 반대쪽으로">⇄</button>
+        <button class="icon" data-act="swap-side" title="패널 위치 바꾸기">⇄</button>
       </header>
       <nav>${tab("palette", "색·테마")}${tab("element", "요소")}${tab("comments", "댓글", S.comments.length)}${tab("changes", "바뀐 것", cur().changes.length)}${tab("proposals", "시안", S.proposals.filter((p) => !["applied", "discarded"].includes(p.status)).length || null)}</nav>
       <div class="body">${panelBody()}</div>`;
@@ -654,8 +655,8 @@
   };
   function proposalsHtml() {
     const intro = INFO.claude && INFO.proposals !== false
-      ? `<p class="small">저장할 때 <b>저장하고 시안 만들기</b>를 누르면 Claude 가 진짜 화면 파일은 그대로 두고 복사본(시안)에만 고쳐요. 시안을 보고 반영할지 정하세요.</p>`
-      : `<p class="small">이 컴퓨터에서 <code>claude</code> 명령을 못 찾아 시안을 자동으로 만들 수 없어요. Claude Code 를 설치하면 여기서 바로 시안을 받아 볼 수 있어요. 지금은 저장본을 Claude Code 에 직접 넘겨 주세요.</p>`;
+      ? `<p class="small"><b>저장하고 시안 만들기</b> → Claude 가 복사본에 고쳐요. 보고 반영할지 정해요.</p>`
+      : `<p class="small"><code>claude</code> 명령이 없어 시안은 못 만들어요. 저장본을 Claude Code 에 넘겨 주세요.</p>`;
     if (!S.proposals.length) return `<div class="empty">${intro}</div>`;
     return intro + S.proposals.map((p) => {
       const [label, tone] = PROP_STATUS[p.status] || [p.status, "run"];
@@ -679,7 +680,7 @@
       } else if (p.status === "applied") {
         const r = p.applyReport || {};
         body = `<p class="small">진짜 화면 파일에 반영했어요: ${esc([...(r.applied || []), ...(r.merged || [])].join(", ") || "-")}</p>
-          <p class="small">설치된 앱에 넣으려면 설치 파일을 다시 만들어야 해요 (Claude Code 에 "설치 파일 만들어 줘").</p>`;
+          <p class="small">앱에 따라 빌드·설치를 다시 해야 들어가요.</p>`;
       }
       const conflicts = (p.applyReport || {}).conflicts || [];
       if (p.status === "ready" && conflicts.length) {
@@ -776,7 +777,7 @@
     const row = ([name, label]) => {
       const v = rootVar(name);
       return `<label class="tok ${changed.has(name) ? "changed" : ""}">
-        <button class="swatch" data-pick="token" data-key="${name}" style="--c:${esc(v)}" title="그라데이션 판에서 고르기"></button>
+        <button class="swatch" data-pick="token" data-key="${name}" style="--c:${esc(v)}" title="색 고르기"></button>
         <span class="tname">${label}<code>${name}</code></span>
         <span class="tval">${esc(v)}</span>
         ${changed.has(name) ? `<button class="mini" data-token-reset="${name}" title="원래대로">↺</button>` : ""}
@@ -784,13 +785,13 @@
     };
     return `
       <section ${THEMES.length > 1 ? "" : "hidden"}>
-        <h4>테마 <small>지금 보는 테마에 따로 적혀요</small></h4>
+        <h4>테마 <small>테마마다 따로</small></h4>
         <div class="seg">${THEMES.map((t) => `<button data-theme-set="${t.key}" class="${theme === t.key ? "on" : ""}">${t.label}</button>`).join("")}</div>
       </section>
       <section>
-        <h4>${rootVar(ACCENT.main) ? "강조색 한 번에 <small>진한·옅은 강조도 함께 맞춰요</small>" : "스포이트"}</h4>
-        <div class="accentrow" ${rootVar(ACCENT.main) ? "" : "hidden"}><button class="swatch big" data-pick="accent" data-key="${esc(ACCENT.main)}" style="--c:${esc(rootVar(ACCENT.main))}" title="그라데이션 판에서 고르기"></button>
-          <span class="small">눌러서 판에서 고르거나, 판의 스포이트로 화면 어디서든 색을 따와요</span></div>
+        <h4>${rootVar(ACCENT.main) ? "강조색 <small>진한·옅은 강조 함께</small>" : "스포이트"}</h4>
+        <div class="accentrow" ${rootVar(ACCENT.main) ? "" : "hidden"}><button class="swatch big" data-pick="accent" data-key="${esc(ACCENT.main)}" style="--c:${esc(rootVar(ACCENT.main))}" title="색 고르기"></button>
+          <span class="small">눌러서 고르기 · 판의 스포이트로 화면 색 따기</span></div>
         <button data-eyecopy>스포이트로 색 따서 복사</button>
       </section>
       ${tokenGroups().map(([g, rows]) => `<section><h4>${g}</h4>${rows.map(row).join("")}</section>`).join("")}
@@ -808,8 +809,8 @@
   function elementHtml() {
     if (!S.sel || !S.sel.el.isConnected) {
       return `<div class="empty">
-        <p><b>고르기(S)</b>로 바꾸고 싶은 곳을 누르세요.</p>
-        <p>글자 색·크기, 배경, 모서리, 간격, 크기를 바로 바꿔 볼 수 있어요. 고른 상자 왼쪽 위 <b>⠿ 옮기기</b>를 끌면 순서가 바뀌고, 오른쪽 아래 모서리를 끌면 크기가 바뀌어요.</p>
+        <p><b>고르기(S)</b>나 <b>오른쪽 단추</b>로 요소를 고르세요.</p>
+        <p>끌기 옮기기 · 모서리 크기 · ⠿ 순서 · 두 번 글자</p>
         <button class="primary" data-mode="select">고르기 시작</button></div>`;
     }
     const el = S.sel.el;
@@ -823,7 +824,7 @@
     const reset = (p) => (has(p) ? `<button class="mini" data-style-reset="${p}" title="원래대로">↺</button>` : "");
     const color = (prop, label) => `
       <div class="ctl color ${has(prop) ? "changed" : ""}"><span>${label}${isClear(cs.getPropertyValue(prop)) ? "<code>투명</code>" : ""}</span>
-        <button class="swatch ${isClear(cs.getPropertyValue(prop)) ? "clear" : ""}" data-pick="style" data-key="${prop}" style="--c:${esc(cs.getPropertyValue(prop))}" title="그라데이션 판에서 고르기"></button>
+        <button class="swatch ${isClear(cs.getPropertyValue(prop)) ? "clear" : ""}" data-pick="style" data-key="${prop}" style="--c:${esc(cs.getPropertyValue(prop))}" title="색 고르기"></button>
         <code class="hexv">${esc(isClear(cs.getPropertyValue(prop)) ? "투명" : toHex(cs.getPropertyValue(prop)))}</code>
         ${reset(prop)}</div>`;
     const range = (prop, label, min, max, step = 1, unit = "px") => {
@@ -887,8 +888,8 @@
 
   function commentsHtml() {
     if (!S.comments.length) {
-      return `<div class="empty"><p><b>댓글(C)</b>을 켜고 화면을 누르면 그 자리에, 끌면 그 영역에 댓글을 달아요.</p>
-        <p>"여기 너무 빽빽해", "이 버튼은 위로" 처럼 말로 적어도 Claude 가 어느 요소인지 정확히 알아요.</p>
+      return `<div class="empty"><p><b>댓글(C)</b>: 누르면 그 자리, 끌면 영역.</p>
+        <p>말로 적어도 Claude 가 요소를 찾아요.</p>
         <button class="primary" data-mode="comment">댓글 달기 시작</button></div>`;
     }
     return S.comments.map((c) => `
@@ -916,14 +917,14 @@
     };
     return `
       <section>
-        <h4>조합 <small>조합마다 따로 바꿔 보고 아래 단추·숫자 키로 비교해요</small></h4>
+        <h4>조합 <small>숫자 키로 비교</small></h4>
         <div class="vrow"><input class="wide" data-variant-name value="${esc(v.name)}">
-          <button data-act="variant-dup" title="복사해서 새 조합">복사</button>
-          <button data-act="variant-new" title="아무것도 안 바꾼 새 조합">새로</button>
-          ${S.variants.length > 1 ? `<button data-act="variant-del" title="이 조합 지우기">지우기</button>` : ""}</div>
+          <button data-act="variant-dup">복사</button>
+          <button data-act="variant-new">새로</button>
+          ${S.variants.length > 1 ? `<button data-act="variant-del">지우기</button>` : ""}</div>
       </section>
       <section><h4>바뀐 것 <i data-count>${v.changes.length}</i></h4>
-        ${v.changes.length ? v.changes.map(line).join("") : `<p class="small">아직 없어요. 색·테마 탭이나 고르기로 바꿔 보세요.</p>`}
+        ${v.changes.length ? v.changes.map(line).join("") : `<p class="small">아직 없어요.</p>`}
         ${v.changes.length ? `<button class="danger" data-act="variant-clear">이 조합 모두 비우기</button>` : ""}
       </section>
       <section><h4>저장본 불러오기</h4><div class="saved" data-saved>불러오는 중…</div></section>`;
@@ -1046,6 +1047,29 @@
       return;
     }
     if (S.demoing || fromStudio(e) || e.altKey) return;
+    // 메뉴가 떠 있을 때 앱을 누르면 메뉴만 닫는다 (그 누르기로 고르기·댓글이 되지 않게)
+    if (!$(".cmenu").hidden && e.type === "pointerdown" && e.button !== 2) {
+      closeCtxMenu();
+      S.swallow = true;
+    }
+    if (S.swallow) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.type === "click") S.swallow = false;
+      return;
+    }
+    // 오른쪽 단추: 어느 모드에서든 스튜디오 메뉴 (Alt+오른쪽 단추는 원래 메뉴)
+    if (e.button === 2 || e.type === "contextmenu") {
+      if (e.type === "contextmenu" || S.mode !== "browse") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+      if (e.type === "contextmenu") {
+        const t = appTarget(e);
+        if (t && t !== document.body) openCtxMenu(t, e.clientX, e.clientY);
+      }
+      return;
+    }
     if (S.mode === "browse") {
       // 동작 흐름을 바꿔 둔 단추는 둘러보기에서 누르면 바꾼 흐름대로 시연한다 (앱의 원래 동작 대신)
       if (e.type === "click") {
@@ -1157,6 +1181,114 @@
     document.documentElement.classList.toggle("__studio-picking", m !== "browse");
     if (m === "comment" && S.tab !== "comments") S.tab = "comments";
     render();
+  }
+
+  /* ----- 오른쪽 단추 메뉴 -----
+     모드를 바꾸지 않고 자주 하는 일을 바로: 고르기·댓글·글자·색·크기·숨기기·되돌리기·동작·AI. */
+  let ctx = null; // { el, x, y } (앱 좌표)
+  function isTextish(el) {
+    const t = (el.innerText || "").trim();
+    return !!t && t.length < 400 && [...el.children].every((c) => getComputedStyle(c).display.startsWith("inline"));
+  }
+  function ctxChanges(el) {
+    const sels = new Set([(scopeOptions(el)[0] || {}).sel, cssPath(el)]);
+    return cur().changes.filter((c) => c.type === "style" && sels.has(c.selector));
+  }
+  function ctxItems(el) {
+    const out = [];
+    const add = (id, label, key = "") => out.push({ id, label, key });
+    const sep = () => out.length && out[out.length - 1] !== "-" && out.push("-");
+    add("select", "고르기", "S");
+    const p = el.parentElement;
+    if (p && p !== document.body && p !== document.documentElement) add("parent", "바깥 상자 고르기", "↑");
+    add("comment", "댓글 달기", "C");
+    if (isTextish(el)) add("text", "글자 고치기", "⏎");
+    sep();
+    add("color", "글자 색");
+    add("bg", "바탕 색");
+    add("bigger", "글자 크게");
+    add("smaller", "글자 작게");
+    add("hide", "숨기기");
+    const mine = ctxChanges(el);
+    if (mine.some((c) => c.prop === "translate")) add("unmove", "위치 원래대로");
+    if (mine.length) add("revert", `바꾼 것 되돌리기 (${mine.length})`);
+    sep();
+    if (flowTarget(el)) add("flow", "누르면 일어나는 일");
+    if (INFO.claude) add("ai", "AI 추천");
+    add("copysel", "선택자 복사");
+    if (out[out.length - 1] === "-") out.pop();
+    return out;
+  }
+  function openCtxMenu(el, x, y) {
+    if (S.editing) finishTextEdit(true);
+    if (!$(".pop").hidden) closePop(false);
+    ctx = { el, x, y };
+    const m = $(".cmenu");
+    m.innerHTML = `<div class="chead">${esc(shortLabel(el))}</div>` + ctxItems(el).map((it) => (it === "-" ? "<hr>"
+      : `<button role="menuitem" data-cm="${it.id}"><span>${esc(it.label)}</span>${it.key ? `<kbd>${esc(it.key)}</kbd>` : ""}</button>`)).join("");
+    m.hidden = false;
+    const p = toTop(x, y);
+    m.style.left = `${Math.max(6, Math.min(TOP.innerWidth - m.offsetWidth - 6, p.x + 2))}px`;
+    m.style.top = `${Math.max(6, Math.min(TOP.innerHeight - m.offsetHeight - 6, p.y + 2))}px`;
+    m.querySelector("button")?.focus({ preventScroll: true });
+    S.hover = el;
+    scheduleDraw();
+  }
+  function closeCtxMenu() {
+    const m = $(".cmenu");
+    if (m.hidden) return;
+    m.hidden = true;
+    m.innerHTML = "";
+  }
+  function runCtx(id) {
+    const c = ctx;
+    closeCtxMenu();
+    if (!c || !c.el.isConnected) return;
+    const el = c.el;
+    // 모양을 바꾸는 일은 고르기 모드로 넘어가 그 요소를 고른 뒤 한다 (패널에서 바로 이어 고칠 수 있게)
+    const pick = (target = el) => {
+      if (S.mode !== "select") setMode("select");
+      if (!S.sel || S.sel.el !== target) selectEl(target);
+      S.editKey = null;
+    };
+    if (id === "select") return pick();
+    if (id === "parent") return pick(el.parentElement);
+    if (id === "comment") return startPointComment(el, c.x, c.y);
+    if (id === "text") return pick(), startTextEdit(el);
+    if (id === "color" || id === "bg") {
+      pick();
+      const p = toTop(c.x, c.y);
+      const anchor = { getBoundingClientRect: () => ({ left: p.x + 200, right: p.x + 200, top: p.y, bottom: p.y }) };
+      return openPicker(anchor, "style", id === "color" ? "color" : "background-color");
+    }
+    if (id === "bigger" || id === "smaller") {
+      pick();
+      const fs = parseFloat(getComputedStyle(el).fontSize) || 14;
+      return setStyle("font-size", `${Math.max(6, fs + (id === "bigger" ? 2 : -2))}px`);
+    }
+    if (id === "hide") {
+      pick();
+      setStyle("display", "none");
+      S.sel = null;
+      render();
+      return toast("숨겼어요 · Ctrl+Z 로 되돌리기");
+    }
+    if (id === "unmove") return pick(), resetStyle("translate");
+    if (id === "revert") {
+      const list = ctxChanges(el);
+      S.group = uid("g");
+      list.forEach((ch) => removeChange(ch.id));
+      S.group = null;
+      render();
+      return toast(`${list.length}개 되돌렸어요`);
+    }
+    if (id === "flow") return pick(flowTarget(el));
+    if (id === "ai") {
+      pick();
+      S.ai.open = true;
+      return askAI(true);
+    }
+    if (id === "copysel") return copy(cssPath(el)).then(() => toast("선택자를 복사했어요"));
   }
 
   /* ----- 글자 고치기 ----- */
@@ -1380,7 +1512,7 @@
     pop.innerHTML = `
       <div class="phead">${editing ? `${draft.n}번 댓글 고치기` : "댓글"} <small>${esc(viewLabel(draft.anchor.view))} · ${esc(draft.anchor.label)}</small></div>
       <div class="kinds">${KINDS.map(([k, l]) => `<button data-kind="${k}" class="${(draft.kind || "fix") === k ? "on" : ""}">${l}</button>`).join("")}</div>
-      <textarea rows="4" placeholder="무엇을 어떻게 바꾸면 좋을까요? (예: 여기 글자가 너무 작아, 카드 사이를 넓게)">${esc(draft.text || "")}</textarea>
+      <textarea rows="4" placeholder="무엇을 어떻게? (예: 글자가 작아요)">${esc(draft.text || "")}</textarea>
       <div class="pacts">${editing ? `<label class="chk"><input type="checkbox" data-done ${draft.done ? "checked" : ""}> 해결됨</label>` : ""}
         <span class="sp"></span><button data-pop="cancel">그만두기</button><button class="primary" data-pop="ok">달기 (Ctrl+Enter)</button></div>`;
     pop.hidden = false;
@@ -1580,12 +1712,12 @@
         ${INFO.claude ? `<button data-flow-ai ${aiBusy ? "disabled" : ""}>${aiBusy ? "알아보는 중…" : "AI 에게 알아보기"}</button>` : ""}
         ${f.where ? `<div class="small">코드: <code>${esc(f.where)}</code></div>` : ""}</div>
       ${f.job && f.job.status === "failed" ? `<p class="err">${esc(f.job.error || "못 알아냈어요")}</p>` : ""}
-      <ol class="flow">${f.steps.map(step).join("") || `<li class="small">단계가 없어요. 아래에서 더해 흐름을 짜 보세요.</li>`}</ol>
+      <ol class="flow">${f.steps.map(step).join("") || `<li class="small">단계가 없어요.</li>`}</ol>
       <div class="flowadd">${Object.entries(FLOW_KINDS).map(([k, v]) => `<button data-flow-add="${k}">＋${v.label}</button>`).join("")}</div>
       <div class="pacts2"><button class="primary" data-flow-play>▶ 시연</button>
         ${f.before.length ? `<button data-flow-play-before>지금 동작 시연</button><button data-flow-reset>처음대로</button>` : ""}
         <button data-flow-save>${saved ? "흐름 다시 담기" : "이 흐름으로 바꾸기"}</button></div>
-      <p class="small">담아 두면 둘러보기(V)에서 이 단추를 눌렀을 때 바꾼 흐름대로 시연돼요.</p></section>`;
+      <p class="small">담아 두면 둘러보기에서 이 흐름대로 시연돼요.</p></section>`;
   }
   function showAppToast(text) {
     if (APP.toast) APP.toast(text);
@@ -1873,7 +2005,7 @@
       inner = `<div class="ai-head"><span class="spark">✨</span><b>AI 추천</b><button class="mini" data-ai="close">✕</button></div>
         <input class="wide" data-ai-ask value="${esc(a.ask)}" placeholder="바라는 느낌 (예: 더 차분하게, 카드 정리)">
         <div class="pacts2"><button class="primary" data-ai="ask-screen">이 화면 추천</button>${S.sel ? `<button data-ai="ask-sel">고른 것 추천</button>` : ""}</div>
-        <label class="chk"><input type="checkbox" data-ai-auto ${a.auto ? "checked" : ""}> 고르거나 화면을 옮기면 알아서 추천 (30초에 한 번)</label>`;
+        <label class="chk"><input type="checkbox" data-ai-auto ${a.auto ? "checked" : ""}> 알아서 추천</label>`;
     } else {
       box.classList.remove("open");
       box.innerHTML = `<button class="ai-pill" data-ai="open" title="AI 추천">✨ <span>AI 추천</span>${a.auto ? `<i class="on"></i>` : ""}</button>`;
@@ -1989,7 +2121,7 @@
       <h3>${INFO.ctx ? "이 시안을 더 고쳐 달라고 하기" : "저장해서 Claude 에게 넘기기"}</h3>
       <p class="small">댓글 ${S.comments.length}개 · 바꾼 것 ${total}개 (조합 ${S.variants.length}개)</p>
       <label>한 줄 제목<input data-f="title" value="${esc(S.title)}" placeholder="예: 첫 화면 카드 정리, 강조색 남색으로"></label>
-      <label>전체 메모<textarea data-f="note" rows="3" placeholder="전체적으로 바라는 느낌이 있으면 적어 주세요">${esc(S.note)}</textarea></label>
+      <label>전체 메모<textarea data-f="note" rows="3" placeholder="바라는 느낌 (선택)">${esc(S.note)}</textarea></label>
       <label>반영할 조합<select data-f="chosen">${S.variants.map((v, i) => `<option value="${i}" ${i === S.active ? "selected" : ""}>${esc(v.name)} · 바꾼 것 ${v.changes.length}</option>`).join("")}</select></label>
       <div class="seg two">
         <button data-freedom="refine" class="${S.freedom === "refine" ? "on" : ""}">뜻을 살려 더 다듬어 줘</button>
@@ -1999,7 +2131,7 @@
         !INFO.claude || INFO.proposals === false ? `<button class="primary" data-modal="save">저장</button>`
         : INFO.ctx ? `<button class="primary" data-modal="save-revise">저장하고 다시 고치기</button>`
         : `<button data-modal="save">저장만</button><button class="primary" data-modal="save-propose">저장하고 시안 만들기</button>`}</div>
-      ${INFO.claude && INFO.proposals !== false && !INFO.ctx ? `<p class="small">시안: Claude 가 진짜 화면 파일은 그대로 두고 복사본에 고쳐요. 다 되면 원래·시안을 오가며 보고 반영할지 정해요.</p>` : ""}
+      ${INFO.claude && INFO.proposals !== false && !INFO.ctx ? `<p class="small">시안: Claude 가 복사본에 고쳐요. 보고 반영할지 정해요.</p>` : ""}
       <div class="result" hidden></div></div>`;
     m.hidden = false;
     m.querySelector("[data-f=title]").focus();
@@ -2052,7 +2184,7 @@
       const say = `디자인 스튜디오 저장본 ${res.name} 반영해 줘`;
       out.innerHTML = `<p>저장했어요: <code>${esc(INFO.requests || ".design-studio/requests")}/${esc(res.name)}.md</code></p>
         <p>Claude Code 에 이렇게 말하세요:</p><div class="say"><code>${esc(say)}</code><button data-copy="${esc(say)}">복사</button></div>
-        <p class="small">웹(claude.ai)에서 쓰면 파일이 안 보이니 아래 '내용 복사'로 붙여 넣으세요.</p>
+        <p class="small">웹에서는 '내용 복사'로 붙여 넣으세요.</p>
         <button data-copy-md>내용 복사 (마크다운)</button>`;
       out._md = md;
     } catch (err) {
@@ -2307,6 +2439,31 @@
     }
   }
   root.addEventListener("click", onStudioClick);
+  $(".cmenu").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-cm]");
+    if (b) runCtx(b.dataset.cm);
+  });
+  $(".cmenu").addEventListener("contextmenu", (e) => e.preventDefault());
+  $(".cmenu").addEventListener("keydown", (e) => {
+    const items = [...$(".cmenu").querySelectorAll("button")];
+    const i = items.indexOf(root.activeElement);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeCtxMenu();
+    }
+  });
+  // 바깥 틀(막대·패널)을 누르거나 창을 굴리면 메뉴를 닫는다
+  root.addEventListener("pointerdown", (e) => {
+    if (!e.composedPath().includes($(".cmenu"))) closeCtxMenu();
+  }, true);
+  window.addEventListener("scroll", closeCtxMenu, true);
+  // 창 전체가 초점을 잃을 때만 닫는다. 앱 iframe 의 blur 로 닫으면, 메뉴(바깥 틀)에 초점을 주는 순간 닫혀 버렸다.
+  TOP.addEventListener("blur", () => ovHost.isConnected && closeCtxMenu());
   ovRoot.addEventListener("click", onStudioClick);
   let stepDrag = -1;
   root.addEventListener("dragstart", (e) => {
@@ -2408,6 +2565,10 @@
   /* ---------- 단축키 ---------- */
   function onKey(e) {
     const t = e.composedPath()[0];
+    if (e.key === "Escape" && !$(".cmenu").hidden) {
+      e.preventDefault();
+      return closeCtxMenu();
+    }
     if (S.editing) {
       if (S.editing.contains(e.target)) {
         e.stopPropagation(); // 앱 단축키(검색 Ctrl+K 등)가 글자 입력을 가로채지 않게
@@ -2544,7 +2705,7 @@
       * { box-sizing: border-box; }
       [hidden] { display: none !important; }
       button, input, select, textarea { font: inherit; color: inherit; }
-      .ov, .bar, .panel, .pop, .modal, .toast, .picker, .ai {
+      .ov, .bar, .panel, .pop, .modal, .toast, .picker, .ai, .cmenu {
         /* Anthropic 브랜드: Dark #141413 · Light #faf9f5 · Mid Gray #b0aea5 · Light Gray #e8e6dc
            강조 Orange #d97757(주) · Blue #6a9bcc · Green #788c5d. 제목 Poppins, 본문 Lora (한글은 이어지는 대체 글꼴).
            bg2·bg3·line 은 Dark 에 Light 를 6·11·18% 섞은 층. 글자 대비는 모두 4.5:1 이상으로 맞췄다
@@ -2707,6 +2868,16 @@
       .srow { text-align: left; display: grid; }
       .srow small { color: var(--s-soft); }
 
+      .cmenu { position: fixed; z-index: 2147483006; min-width: 188px; max-width: 260px; background: var(--s-bg); color: var(--s-text);
+        border: 1px solid var(--s-line); border-radius: 10px; padding: 4px; box-shadow: 0 14px 34px -10px rgba(0,0,0,.55);
+        font: 13px/1.3 var(--s-head); }
+      .cmenu .chead { padding: 6px 10px 4px; color: var(--s-soft); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .cmenu hr { border: 0; border-top: 1px solid var(--s-line); margin: 4px 2px; }
+      .cmenu button { display: flex; width: 100%; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 6px;
+        background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+      .cmenu button span { flex: 1; }
+      .cmenu button:hover, .cmenu button:focus-visible { background: var(--s-acc); color: var(--s-on-acc); outline: none; }
+      .cmenu kbd { font: 11px var(--s-head); opacity: .65; }
       .pop { position: fixed; z-index: 2147483003; width: 320px; background: var(--s-bg); border: 1px solid var(--s-line); border-radius: 12px; padding: 10px;
              box-shadow: 0 12px 40px rgba(0,0,0,.45); }
       .phead { font: 600 13px/1.4 var(--s-head); margin-bottom: 8px; }
