@@ -555,7 +555,7 @@
     const bar = $(".bar");
     bar.hidden = S.clean;
     const mode = (k, label, key, icon) =>
-      `<button class="mode ${S.mode === k ? "on" : ""}" data-mode="${k}" title="${label} (${key})"><b>${icon}</b>${label}<kbd>${key}</kbd></button>`;
+      `<button class="mode ${S.mode === k ? "on" : ""}" data-mode="${k}" title="${label} (${key})"><b>${icon}</b>${label}</button>`;
     bar.innerHTML = `
       <div class="grp">
         ${mode("browse", "둘러보기", "V", "☞")}
@@ -572,11 +572,10 @@
         <button class="icon" data-act="variant-dup" title="조합 복사">＋</button>
       </div>
       <div class="grp">
-        <button class="save" data-act="save">${INFO.ctx ? "이 시안 더 고쳐 달라기" : "저장해서 Claude에게"}</button>
+        <button class="save" data-act="save">${INFO.ctx ? "더 고쳐 달라기" : "Claude에게"}</button>
         <button class="icon" data-act="toggle-panel" title="패널 접기">${S.collapsed ? "◧" : "◨"}</button>
       </div>
-      ${ctxPill()}
-      <div class="hint">${esc(hintText())}</div>`;
+      ${ctxPill()}`;
     setBarHeight();
   }
   function ctxPill() {
@@ -597,12 +596,7 @@
     const bar = $(".bar");
     host.style.setProperty("--barh", `${(bar && !bar.hidden && bar.offsetHeight) || 0}px`);
   }
-  function hintText() {
-    if (INFO.ctx && S.mode === "browse") return "시안 보는 중 · 댓글 달고 '더 고쳐 달라기' · 좋으면 시안 탭에서 반영";
-    if (S.mode === "select") return "누르기 고르기 · 두 번 글자 · ↑ 바깥 상자 · 오른쪽 단추 메뉴";
-    if (S.mode === "comment") return "누르기 댓글 · 끌기 영역 댓글 · 오른쪽 단추 메뉴";
-    return `앱처럼 써 보기 · 오른쪽 단추 메뉴 · ${INFO.mode === "real" ? "내 데이터, 읽기만" : "연습용 데이터"}`;
-  }
+
 
   /* ----- 오른쪽 패널 ----- */
   let panelTimer = 0;
@@ -633,7 +627,7 @@
     const tab = (k, label, n) => `<button class="tab ${S.tab === k ? "on" : ""}" data-tab="${k}">${label}${n != null ? ` <i>${n}</i>` : ""}</button>`;
     panel.innerHTML = `
       <header>
-        <div class="brand">디자인 스튜디오 <small>${esc(INFO.app || "")} · ${INFO.mode === "real" ? "내 데이터 · 읽기만" : "연습용"}${INFO.version ? ` · v${esc(INFO.version)}` : ""}</small></div>
+        <div class="brand">${esc(INFO.app || "디자인 스튜디오")}${INFO.mode === "real" ? ` <small>내 데이터</small>` : ""}</div>
         <button class="icon" data-act="swap-side" title="패널 위치 바꾸기">⇄</button>
       </header>
       <nav>${tab("palette", "색·테마")}${tab("element", "요소")}${tab("comments", "댓글", S.comments.length)}${tab("changes", "바뀐 것", cur().changes.length)}${tab("proposals", "시안", S.proposals.filter((p) => !["applied", "discarded"].includes(p.status)).length || null)}</nav>
@@ -655,9 +649,9 @@
   };
   function proposalsHtml() {
     const intro = INFO.claude && INFO.proposals !== false
-      ? `<p class="small"><b>저장하고 시안 만들기</b> → Claude 가 복사본에 고쳐요. 보고 반영할지 정해요.</p>`
-      : `<p class="small"><code>claude</code> 명령이 없어 시안은 못 만들어요. 저장본을 Claude Code 에 넘겨 주세요.</p>`;
-    if (!S.proposals.length) return `<div class="empty">${intro}</div>`;
+      ? ""
+      : `<p class="small">claude 없음</p>`;
+    if (!S.proposals.length) return `<div class="empty">${intro || `<p class="small">시안 없음</p>`}</div>`;
     return intro + S.proposals.map((p) => {
       const [label, tone] = PROP_STATUS[p.status] || [p.status, "run"];
       const rounds = p.rounds || [];
@@ -679,8 +673,7 @@
           <div class="pacts2">${(p.changed || []).length ? btn("view", "지금까지 된 것 보기") : ""}${btn("revise", "다시 시키기")}${btn("discard", "버리기", "danger")}</div>`;
       } else if (p.status === "applied") {
         const r = p.applyReport || {};
-        body = `<p class="small">진짜 화면 파일에 반영했어요: ${esc([...(r.applied || []), ...(r.merged || [])].join(", ") || "-")}</p>
-          <p class="small">앱에 따라 빌드·설치를 다시 해야 들어가요.</p>`;
+        body = `<p class="small">반영됨 · ${esc([...(r.applied || []), ...(r.merged || [])].join(", ") || "-")}</p>`;
       }
       const conflicts = (p.applyReport || {}).conflicts || [];
       if (p.status === "ready" && conflicts.length) {
@@ -785,14 +778,13 @@
     };
     return `
       <section ${THEMES.length > 1 ? "" : "hidden"}>
-        <h4>테마 <small>테마마다 따로</small></h4>
+        <h4>테마</h4>
         <div class="seg">${THEMES.map((t) => `<button data-theme-set="${t.key}" class="${theme === t.key ? "on" : ""}">${t.label}</button>`).join("")}</div>
       </section>
       <section>
-        <h4>${rootVar(ACCENT.main) ? "강조색 <small>진한·옅은 강조 함께</small>" : "스포이트"}</h4>
-        <div class="accentrow" ${rootVar(ACCENT.main) ? "" : "hidden"}><button class="swatch big" data-pick="accent" data-key="${esc(ACCENT.main)}" style="--c:${esc(rootVar(ACCENT.main))}" title="색 고르기"></button>
-          <span class="small">눌러서 고르기 · 판의 스포이트로 화면 색 따기</span></div>
-        <button data-eyecopy>스포이트로 색 따서 복사</button>
+        <h4>${rootVar(ACCENT.main) ? "강조색" : "스포이트"}</h4>
+        <div class="accentrow" ${rootVar(ACCENT.main) ? "" : "hidden"}><button class="swatch big" data-pick="accent" data-key="${esc(ACCENT.main)}" style="--c:${esc(rootVar(ACCENT.main))}" title="색 고르기"></button></div>
+        <button data-eyecopy title="화면 어디서든 색 따서 복사">스포이트</button>
       </section>
       ${tokenGroups().map(([g, rows]) => `<section><h4>${g}</h4>${rows.map(row).join("")}</section>`).join("")}
       <section ${sizeTokens().length ? "" : "hidden"}>
@@ -808,10 +800,7 @@
 
   function elementHtml() {
     if (!S.sel || !S.sel.el.isConnected) {
-      return `<div class="empty">
-        <p><b>고르기(S)</b>나 <b>오른쪽 단추</b>로 요소를 고르세요.</p>
-        <p>끌기 옮기기 · 모서리 크기 · ⠿ 순서 · 두 번 글자</p>
-        <button class="primary" data-mode="select">고르기 시작</button></div>`;
+      return `<div class="empty"><button class="primary" data-mode="select">⬚ 고르기</button></div>`;
     }
     const el = S.sel.el;
     const cs = getComputedStyle(el);
@@ -842,12 +831,10 @@
     const n = mine.length;
     return `
       <div class="crumbs">${crumbs.map((c, i) => `<button data-crumb="${crumbs.length - 1 - i}" class="${c === el ? "on" : ""}">${esc(shortLabel(c))}</button>`).join("<i>›</i>")}</div>
-      <div class="selinfo"><b>${esc(shortLabel(el))}</b> <span>${Math.round(el.getBoundingClientRect().width)}×${Math.round(el.getBoundingClientRect().height)}</span>
-        ${textOf(el) ? `<div class="txt">“${esc(textOf(el).slice(0, 60))}”</div>` : ""}</div>
+      <div class="selinfo"><b>${esc(textOf(el) ? textOf(el).slice(0, 30) : shortLabel(el))}</b></div>
       <section>
-        <h4>어디까지 바꿀까요</h4>
-        <select class="wide" data-scope>${opts.map((o) => `<option value="${esc(o.sel)}" ${o.sel === S.scope ? "selected" : ""}>${esc(o.label)} · ${o.n}개 — ${esc(o.sel.length > 46 ? o.sel.slice(0, 46) + "…" : o.sel)}</option>`).join("")}</select>
-        <details class="rules"><summary>CSS 에서 걸린 규칙 ${matchedRules(el).length}개</summary><code>${matchedRules(el).map(esc).join("<br>")}</code></details>
+        <h4>범위</h4>
+        <select class="wide" data-scope>${opts.map((o) => `<option value="${esc(o.sel)}" ${o.sel === S.scope ? "selected" : ""} title="${esc(o.sel)}">${esc(o.label)} (${o.n})</option>`).join("")}</select>
       </section>
       <section><h4>글자</h4>
         ${color("color", "색")}
@@ -883,14 +870,12 @@
         <button data-act="edit-text">글자 고치기</button>
         <button data-act="comment-here">여기에 댓글</button>
       </section>
-      ${n ? `<p class="small">이 범위에 바꾼 것 ${n}개 · 같은 모양 ${countOf(S.scope)}곳에 함께 보여요</p>` : ""}`;
+`;
   }
 
   function commentsHtml() {
     if (!S.comments.length) {
-      return `<div class="empty"><p><b>댓글(C)</b>: 누르면 그 자리, 끌면 영역.</p>
-        <p>말로 적어도 Claude 가 요소를 찾아요.</p>
-        <button class="primary" data-mode="comment">댓글 달기 시작</button></div>`;
+      return `<div class="empty"><button class="primary" data-mode="comment">✎ 댓글 달기</button></div>`;
     }
     return S.comments.map((c) => `
       <div class="cmt ${c.done ? "done" : ""}">
@@ -917,14 +902,14 @@
     };
     return `
       <section>
-        <h4>조합 <small>숫자 키로 비교</small></h4>
+        <h4>조합</h4>
         <div class="vrow"><input class="wide" data-variant-name value="${esc(v.name)}">
           <button data-act="variant-dup">복사</button>
           <button data-act="variant-new">새로</button>
           ${S.variants.length > 1 ? `<button data-act="variant-del">지우기</button>` : ""}</div>
       </section>
       <section><h4>바뀐 것 <i data-count>${v.changes.length}</i></h4>
-        ${v.changes.length ? v.changes.map(line).join("") : `<p class="small">아직 없어요.</p>`}
+        ${v.changes.length ? v.changes.map(line).join("") : ""}
         ${v.changes.length ? `<button class="danger" data-act="variant-clear">이 조합 모두 비우기</button>` : ""}
       </section>
       <section><h4>저장본 불러오기</h4><div class="saved" data-saved>불러오는 중…</div></section>`;
@@ -937,7 +922,7 @@
       box.innerHTML = res.items.length
         ? res.items.slice(0, 12).map((it) => `<button class="srow" data-load="${esc(it.name)}">
             <b>${esc(it.title || it.name)}</b><small>${esc(it.name.slice(0, 15))} · 댓글 ${it.comments} · 바꾼 것 ${it.changes}${it.applied ? " · 반영됨" : ""}</small></button>`).join("")
-        : `<p class="small">아직 저장한 것이 없어요.</p>`;
+        : "";
     } catch {
       box.textContent = "목록을 못 불러왔어요.";
     }
@@ -1225,7 +1210,7 @@
     ctx = { el, x, y };
     const m = $(".cmenu");
     m.innerHTML = `<div class="chead">${esc(shortLabel(el))}</div>` + ctxItems(el).map((it) => (it === "-" ? "<hr>"
-      : `<button role="menuitem" data-cm="${it.id}"><span>${esc(it.label)}</span>${it.key ? `<kbd>${esc(it.key)}</kbd>` : ""}</button>`)).join("");
+      : `<button role="menuitem" data-cm="${it.id}"><span>${esc(it.label)}</span></button>`)).join("");
     m.hidden = false;
     const p = toTop(x, y);
     m.style.left = `${Math.max(6, Math.min(TOP.innerWidth - m.offsetWidth - 6, p.x + 2))}px`;
@@ -1510,7 +1495,7 @@
     const pop = $(".pop");
     const editing = !!draft.id;
     pop.innerHTML = `
-      <div class="phead">${editing ? `${draft.n}번 댓글 고치기` : "댓글"} <small>${esc(viewLabel(draft.anchor.view))} · ${esc(draft.anchor.label)}</small></div>
+      <div class="phead">${editing ? `${draft.n}번 댓글 고치기` : "댓글"} <small>${esc(draft.anchor.label)}</small></div>
       <div class="kinds">${KINDS.map(([k, l]) => `<button data-kind="${k}" class="${(draft.kind || "fix") === k ? "on" : ""}">${l}</button>`).join("")}</div>
       <textarea rows="4" placeholder="무엇을 어떻게? (예: 글자가 작아요)">${esc(draft.text || "")}</textarea>
       <div class="pacts">${editing ? `<label class="chk"><input type="checkbox" data-done ${draft.done ? "checked" : ""}> 해결됨</label>` : ""}
@@ -1707,17 +1692,16 @@
         ${st.kind === "nav" ? `<select data-step-view="${i}">${viewOpts(st.view)}</select>` : `<input data-step-text="${i}" value="${esc(st.text || "")}" placeholder="${esc(FLOW_KINDS[st.kind]?.ph || "")}">`}</li>`;
     const aiBusy = f.job && f.job.status === "running";
     const saved = cur().changes.some((c) => c.type === "flow" && c.target.path === f.path);
-    return `<section class="flowbox"><h4>동작 <small>누르면 일어나는 일 · ${esc(shortLabel(btn))}</small></h4>
-      <div class="flowsrc">${f.summary ? `지금: ${esc(f.summary)}` : "지금 하는 일은 코드에서 알아봐야 해요"}
+    return `<section class="flowbox"><h4>동작</h4>
+      <div class="flowsrc">${f.summary ? esc(f.summary) : ""}
         ${INFO.claude ? `<button data-flow-ai ${aiBusy ? "disabled" : ""}>${aiBusy ? "알아보는 중…" : "AI 에게 알아보기"}</button>` : ""}
-        ${f.where ? `<div class="small">코드: <code>${esc(f.where)}</code></div>` : ""}</div>
+</div>
       ${f.job && f.job.status === "failed" ? `<p class="err">${esc(f.job.error || "못 알아냈어요")}</p>` : ""}
-      <ol class="flow">${f.steps.map(step).join("") || `<li class="small">단계가 없어요.</li>`}</ol>
+      <ol class="flow">${f.steps.map(step).join("") || ""}</ol>
       <div class="flowadd">${Object.entries(FLOW_KINDS).map(([k, v]) => `<button data-flow-add="${k}">＋${v.label}</button>`).join("")}</div>
       <div class="pacts2"><button class="primary" data-flow-play>▶ 시연</button>
-        ${f.before.length ? `<button data-flow-play-before>지금 동작 시연</button><button data-flow-reset>처음대로</button>` : ""}
-        <button data-flow-save>${saved ? "흐름 다시 담기" : "이 흐름으로 바꾸기"}</button></div>
-      <p class="small">담아 두면 둘러보기에서 이 흐름대로 시연돼요.</p></section>`;
+        ${f.before.length ? `<button data-flow-play-before>▶ 지금</button><button data-flow-reset>↺</button>` : ""}
+        <button data-flow-save>${saved ? "다시 담기" : "담기"}</button></div></section>`;
   }
   function showAppToast(text) {
     if (APP.toast) APP.toast(text);
@@ -1988,7 +1972,7 @@
     if (a.status === "thinking") {
       inner = `<div class="ai-head"><span class="spark">✨</span><b>생각하는 중</b><span class="dots"><i></i><i></i><i></i></span>
         <button class="mini" data-ai="close" title="그만">✕</button></div>
-        <p class="small">${a.focus ? "고른 요소" : `${esc(viewLabel(viewKey()))} 화면`}을 보고 있어요</p>`;
+`;
     } else if (a.status === "show" && a.items[a.idx]) {
       const it = a.items[a.idx];
       inner = `<div class="ai-head"><span class="spark">✨</span><b>이건 어때요?</b><span class="cnt">${a.idx + 1}/${a.items.length}${a.jobStatus === "running" ? "+" : ""}</span>
@@ -2118,20 +2102,18 @@
     const m = $(".modal");
     const total = S.variants.reduce((n, v) => n + v.changes.length, 0);
     m.innerHTML = `<div class="card">
-      <h3>${INFO.ctx ? "이 시안을 더 고쳐 달라고 하기" : "저장해서 Claude 에게 넘기기"}</h3>
-      <p class="small">댓글 ${S.comments.length}개 · 바꾼 것 ${total}개 (조합 ${S.variants.length}개)</p>
-      <label>한 줄 제목<input data-f="title" value="${esc(S.title)}" placeholder="예: 첫 화면 카드 정리, 강조색 남색으로"></label>
-      <label>전체 메모<textarea data-f="note" rows="3" placeholder="바라는 느낌 (선택)">${esc(S.note)}</textarea></label>
-      <label>반영할 조합<select data-f="chosen">${S.variants.map((v, i) => `<option value="${i}" ${i === S.active ? "selected" : ""}>${esc(v.name)} · 바꾼 것 ${v.changes.length}</option>`).join("")}</select></label>
+      <h3>${INFO.ctx ? "더 고쳐 달라기" : "Claude 에게"} <small>댓글 ${S.comments.length} · 바꾼 것 ${total}</small></h3>
+      <input data-f="title" value="${esc(S.title)}" placeholder="제목">
+      <textarea data-f="note" rows="2" placeholder="메모">${esc(S.note)}</textarea>
+      <label>조합<select data-f="chosen">${S.variants.map((v, i) => `<option value="${i}" ${i === S.active ? "selected" : ""}>${esc(v.name)} · 바꾼 것 ${v.changes.length}</option>`).join("")}</select></label>
       <div class="seg two">
-        <button data-freedom="refine" class="${S.freedom === "refine" ? "on" : ""}">뜻을 살려 더 다듬어 줘</button>
-        <button data-freedom="exact" class="${S.freedom === "exact" ? "on" : ""}">적은 그대로만</button>
+        <button data-freedom="refine" class="${S.freedom === "refine" ? "on" : ""}">다듬어서</button>
+        <button data-freedom="exact" class="${S.freedom === "exact" ? "on" : ""}">그대로</button>
       </div>
       <div class="macts"><button data-modal="close">닫기</button>${
         !INFO.claude || INFO.proposals === false ? `<button class="primary" data-modal="save">저장</button>`
-        : INFO.ctx ? `<button class="primary" data-modal="save-revise">저장하고 다시 고치기</button>`
-        : `<button data-modal="save">저장만</button><button class="primary" data-modal="save-propose">저장하고 시안 만들기</button>`}</div>
-      ${INFO.claude && INFO.proposals !== false && !INFO.ctx ? `<p class="small">시안: Claude 가 복사본에 고쳐요. 보고 반영할지 정해요.</p>` : ""}
+        : INFO.ctx ? `<button class="primary" data-modal="save-revise">다시 고치기</button>`
+        : `<button data-modal="save">저장</button><button class="primary" data-modal="save-propose">시안 만들기</button>`}</div>
       <div class="result" hidden></div></div>`;
     m.hidden = false;
     m.querySelector("[data-f=title]").focus();
@@ -2184,7 +2166,6 @@
       const say = `디자인 스튜디오 저장본 ${res.name} 반영해 줘`;
       out.innerHTML = `<p>저장했어요: <code>${esc(INFO.requests || ".design-studio/requests")}/${esc(res.name)}.md</code></p>
         <p>Claude Code 에 이렇게 말하세요:</p><div class="say"><code>${esc(say)}</code><button data-copy="${esc(say)}">복사</button></div>
-        <p class="small">웹에서는 '내용 복사'로 붙여 넣으세요.</p>
         <button data-copy-md>내용 복사 (마크다운)</button>`;
       out._md = md;
     } catch (err) {
@@ -2893,7 +2874,9 @@
       .modal { position: fixed; inset: 0; z-index: 2147483004; background: rgba(0,0,0,.45); display: grid; place-items: center; }
       .modal .card { width: min(460px, calc(100vw - 32px)); background: var(--s-bg); border: 1px solid var(--s-line); border-radius: 14px; padding: 18px; display: grid; gap: 10px; }
       .modal h3 { margin: 0; font: 600 16px/1.3 var(--s-head); }
-      .modal label { display: grid; gap: 4px; color: var(--s-soft); }
+      .modal label { display: flex; align-items: center; gap: 8px; color: var(--s-soft); }
+      .modal label select { flex: 1; }
+      .modal h3 small { margin-left: 6px; font: 400 12px var(--s-head); color: var(--s-soft); }
       .modal select { background: var(--s-bg2); border: 1px solid var(--s-line); border-radius: 8px; padding: 6px; }
       .seg.two button { padding: 7px !important; }
       .macts { justify-content: flex-end; }
