@@ -1,0 +1,36 @@
+/* 디자인 스튜디오가 앱 화면(Shadow DOM 바깥)에 직접 다는 표시. 도구 화면 자체 스타일은 studio.js 의 STUDIO_CSS 에 있다. */
+html.__studio-picking,
+html.__studio-picking * {
+  cursor: crosshair !important;
+}
+
+.__studio-editing {
+  outline: 2px dashed #d97757 !important; /* 브랜드 Orange */
+  outline-offset: 2px;
+  cursor: text !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.__studio-dragging {
+  opacity: 0.45 !important;
+}
+
+.__studio-flash {
+  animation: __studio-flash 1.4s ease-out;
+}
+
+@keyframes __studio-flash {
+  0%, 40% { outline: 3px solid #6a9bcc; outline-offset: 3px; } /* 브랜드 Blue: 댓글 쪽 색 */
+  100% { outline: 3px solid transparent; outline-offset: 8px; }
+}
+
+/* AI 추천 시연: 바뀔 곳이 반짝인다 */
+.__studio-sparkle {
+  animation: __studio-sparkle 1.2s ease-in-out 2;
+}
+
+@keyframes __studio-sparkle {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 87, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(217, 119, 87, 0.85), 0 0 22px 6px rgba(106, 155, 204, 0.45); } /* Orange·Blue */
+}
