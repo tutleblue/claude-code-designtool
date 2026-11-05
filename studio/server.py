@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import base64
+import binascii
 import http.client
 import json
 import mimetypes
@@ -50,6 +52,7 @@ try:
 except OSError:
     VERSION = ""
 
+NO_CACHE = {"cache-control", "expires", "etag", "last-modified", "age", "pragma"}
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
        "transfer-encoding", "upgrade", "content-length", "x-frame-options"}
 
@@ -71,7 +74,8 @@ SHELL_HTML = """<!doctype html>
 </head>
 <body>
   <script>window.__STUDIO_SHELL__ = true;</script>
-  <iframe id="app" title="{NAME}" src="{SRC}"></iframe>
+  <!-- display-capture: 캡처(탭 화면 찍기)를 iframe 안 도구에서도 부를 수 있게 -->
+  <iframe id="app" title="{NAME}" src="{SRC}" allow="display-capture; clipboard-write"></iframe>
 </body>
 </html>
 """
@@ -262,7 +266,8 @@ def build_handler(st: Studio):
                     return self._send(body, headers.get("content-type", "text/plain"), status)
                 html = body.decode("utf-8", errors="replace")
             info = {"mode": cfg.mode, "modes": cfg.modes, "app": cfg.name, "version": VERSION, "requests": cfg.rel(cfg.requests_dir),
-                    "ctx": "" if st.override else self._context(), "claude": st.claude_ok, "proposals": cfg.proposals, "snapshot": st.args.snapshot}
+                    "ctx": "" if st.override else self._context(), "claude": st.claude_ok, "proposals": cfg.proposals, "snapshot": st.args.snapshot,
+                    "captures": cfg.rel(captures_dir(cfg))}
             head = ('<link rel="stylesheet" href="/__studio/studio-fonts.css" />\n'
                     '<link rel="stylesheet" href="/__studio/studio.css" />\n')
             # 앱 스크립트가 다 돈 뒤 붙도록 body 끝에, defer 로 (defer 끼리는 문서 순서대로 돈다)
@@ -286,6 +291,11 @@ def build_handler(st: Studio):
                 return self.send_json({"ok": True, "items": st.proposals.list(), "claude": st.claude_ok})
             if name == "proposal-diff":
                 return self.send_json({"ok": True, "diff": st.proposals.diff(params.get("name", [""])[0])})
+            if name == "capture":
+                path = capture_path(cfg, params.get("id", [""])[0])
+                if path and path.is_file():
+                    return self._send(path.read_bytes(), "image/png" if path.suffix == ".png" else "image/jpeg")
+                return self.send_json({"ok": False, "message": "그런 캡처가 없어요."}, 404)
             if name == "ai-job":
                 return self.send_json(st.ai.public(params.get("id", [""])[0]) or {"ok": False, "status": "gone"})
             if name == "requests":
@@ -332,7 +342,12 @@ def build_handler(st: Studio):
             self._dispatch()
 
         def _studio_post(self, name: str) -> None:
+            if int(self.headers.get("Content-Length") or 0) > MAX_POST:
+                self._body()
+                return self.send_json({"ok": False, "message": "너무 커요."}, 413)
             payload = self._json_body()
+            if name == "capture":
+                return self._save_capture(payload)
             if name == "save":
                 return self._save_request(payload)
             if name.startswith("ai/"):
@@ -366,6 +381,27 @@ def build_handler(st: Studio):
             (cfg.requests_dir / f"{stem}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             (cfg.requests_dir / f"{stem}.md").write_text(str(payload.get("markdown") or ""), encoding="utf-8")
             self.send_json({"ok": True, "name": stem, "path": str(cfg.requests_dir / f"{stem}.md")})
+
+        def _save_capture(self, payload: dict) -> None:
+            """캡처(탭 화면에서 잘라 낸 그림)를 <workDir>/captures/ 에 둔다. 저장본에는 이름만 들어간다.
+            그림을 저장본 JSON·브라우저 임시본에 통째로 넣으면 localStorage 한도(약 5MB)를 몇 장 만에 넘었다."""
+            data = str(payload.get("data") or "")
+            m = re.fullmatch(r"data:image/(png|jpeg);base64,([A-Za-z0-9+/=\s]+)", data)
+            if not m:
+                return self.send_json({"ok": False, "message": "그림이 아니에요."}, 400)
+            try:
+                raw = base64.b64decode(m.group(2), validate=False)
+            except (ValueError, binascii.Error):
+                return self.send_json({"ok": False, "message": "그림을 읽지 못했어요."}, 400)
+            ext = "png" if m.group(1) == "png" else "jpg"
+            magic = b"\x89PNG\r\n\x1a\n" if ext == "png" else b"\xff\xd8\xff"
+            if not raw.startswith(magic):
+                return self.send_json({"ok": False, "message": "그림이 아니에요."}, 400)
+            folder = captures_dir(cfg)
+            folder.mkdir(parents=True, exist_ok=True)
+            cid = datetime.now().strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex()
+            (folder / f"{cid}.{ext}").write_bytes(raw)
+            self.send_json({"ok": True, "id": cid, "file": f"{cfg.rel(folder)}/{cid}.{ext}"})
 
         def _proposal_action(self, action: str, payload: dict) -> None:
             name = Path(str(payload.get("name") or "")).name
@@ -412,8 +448,11 @@ def build_handler(st: Studio):
             except OSError as exc:
                 return self.send_json({"ok": False, "message": f"앱 서버에 닿지 못했어요 ({exc})."}, 502)
             self.send_response(status)
+            # 앱이 준 캐시 머리글은 버리고 늘 새로 받게 한다. 앱 서버가 캐시 머리글 없이 Last-Modified 만 주면 브라우저가
+            # 스스로 '아직 신선' 하다고 보고, 시안으로 바꿔 다시 띄워도 예전 styles.css 를 그대로 썼다(시험에서 재현).
+            self.send_header("Cache-Control", "no-store")
             for k, v in headers.items():
-                if k not in HOP:
+                if k not in HOP and k not in NO_CACHE:
                     if k == "location" and v.startswith(f"http://{st.upstream.netloc}"):
                         v = v[len(f"http://{st.upstream.netloc}"):] or "/"
                     self.send_header(k, v)
@@ -440,6 +479,25 @@ def build_handler(st: Studio):
                 conn.close()
 
     return Handler
+
+
+MAX_POST = 16 * 1024 * 1024  # 캡처 한 장(큰 화면 PNG)이 들어갈 만큼만
+CAPTURE_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
+
+
+def captures_dir(cfg: appconfig.AppConfig) -> Path:
+    return cfg.work_dir / "captures"
+
+
+def capture_path(cfg: appconfig.AppConfig, cid: str) -> Path | None:
+    # 이름 모양을 정해 두고 그 모양만 받는다 (경로 문자로 다른 파일을 읽지 못하게)
+    if not CAPTURE_ID.fullmatch(cid or ""):
+        return None
+    for ext in ("png", "jpg"):
+        path = captures_dir(cfg) / f"{cid}.{ext}"
+        if path.is_file():
+            return path
+    return None
 
 
 def _insert_before(html: str, tag: str, text: str) -> str:

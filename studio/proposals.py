@@ -133,7 +133,16 @@ class ProposalManager:
         pub = {k: meta.get(k) for k in keep}
         pub["activity"] = (meta.get("activity") or [])[-12:]
         pub["changed"] = self.changed_files(meta["name"]) if meta.get("status") not in ACTIVE else []
+        # 시안 화면 파일이 마지막으로 바뀐 때. 화면이 이것을 보고 Claude 가 고치는 대로 앱을 새로 띄운다 (끝난 시안은 안 센다)
+        pub["stamp"] = self._web_stamp(meta["name"]) if meta.get("status") in (*ACTIVE, "ready", "failed", "cancelled") else 0
         return pub
+
+    def _web_stamp(self, name: str) -> int:
+        web = self.web_dir(name)
+        try:
+            return max((p.stat().st_mtime_ns for p in web.rglob("*") if p.is_file()), default=0)
+        except OSError:  # Claude 가 쓰는 중에 파일이 바뀌었다. 다음 물음 때 다시 센다
+            return 0
 
     # ---------- 차이 ----------
     def changed_files(self, name: str) -> list[dict]:
@@ -245,6 +254,8 @@ class ProposalManager:
   경로를 `{rel_web}/<파일>` 처럼 적어 고친다. 시안 폴더는 진짜 화면 폴더의 글자 파일을 그대로 복사한 것이다.
 - 요청의 '덮어쓰기 CSS' 를 그대로 붙이지 말고, 시안 폴더의 원래 규칙·토큰을 찾아 고친다(같은 모양을 쓰는 다른 곳까지 맞게).
 - 댓글은 말로 된 요청이다. 위치·요소는 요청 글의 선택자와 화면 이름으로 찾는다.
+- '사용자가 한 말' 이 있으면 그것이 이번 요청의 중심이다. 캡처 그림(`…/captures/*.png`)은 사용자가 가리킨 그 화면이니 Read 로 열어 본다.
+- 사용자는 네가 파일을 고치는 대로 시안 화면을 지켜본다. 큰 덩어리를 한 번에 다시 쓰기보다 고칠 곳을 바로바로 고친다.
 - 저장본 옮기기, 빌드·설치, git 은 하지 않는다. 사용자가 시안을 보고 반영 여부를 정한다.
 - 확인 사진(되면): `{snap}` → `{cfg.rel(self.requests_dir)}/shots/{request_stem}/` 의 `*-target.png`(사용자가 만든 모습)와
   `*-proposal.png`(네 시안)를 Read 로 열어 비교한다. 명령이 막히면 건너뛴다.

@@ -56,6 +56,8 @@
     clean: PARAMS.get("clean") === "1",
     savedAs: "",
     proposals: [], // 시안 목록 (서버에서 2.5초마다)
+    ask: "", // 패널 아래 '바로 말하기' 칸에 쓰는 중인 글
+    sending: false,
     drag: null, // 고른 요소를 직접 끌어 옮기는 중
     justDragged: false,
     demoing: false, // 동작 흐름·추천 시연 중 (앱이 누르기를 그대로 받는다)
@@ -561,6 +563,7 @@
         ${mode("browse", "둘러보기", "V", "☞")}
         ${mode("select", "고르기", "S", "⬚")}
         ${mode("comment", "댓글", "C", "✎")}
+        ${mode("capture", "캡처", "X", "▣")}
       </div>
       <div class="grp">
         <button class="icon" data-act="undo" title="되돌리기 Ctrl+Z">↶</button>
@@ -631,7 +634,8 @@
         <button class="icon" data-act="swap-side" title="패널 위치 바꾸기">⇄</button>
       </header>
       <nav>${tab("palette", "색·테마")}${tab("element", "요소")}${tab("comments", "댓글", S.comments.length)}${tab("changes", "바뀐 것", cur().changes.length)}${tab("proposals", "시안", S.proposals.filter((p) => !["applied", "discarded"].includes(p.status)).length || null)}</nav>
-      <div class="body">${panelBody()}</div>`;
+      <div class="body">${panelBody()}</div>
+      ${askHtml()}`;
     if (S.tab === "changes") fillSaved();
   }
   function panelBody() {
@@ -640,6 +644,125 @@
     if (S.tab === "comments") return commentsHtml();
     if (S.tab === "proposals") return proposalsHtml();
     return changesHtml();
+  }
+
+  /* ----- 바로 말하기: 할 말 + 댓글·캡처·바뀐 것을 한 번에 Claude CLI 로 -----
+     처음 보내면 시안(복사본)을 만들고 곧바로 그 시안 화면으로 옮긴다. Claude 가 파일을 고치는 대로 앱이 새로 뜨고,
+     이어서 보내는 말은 같은 Claude 대화(--resume)로 간다. claude 가 없으면 모은 내용을 복사해 Claude Code 에 붙이게 한다. */
+  const ctxProposal = () => (INFO.ctx ? S.proposals.find((p) => p.name === INFO.ctx) : null);
+  const isBusy = (p) => !!p && (p.status === "running" || p.status === "queued");
+  const canRun = () => INFO.claude && INFO.proposals !== false;
+  function askHtml() {
+    if (INFO.snapshot) return "";
+    const shots = S.comments.filter((c) => c.capture).length;
+    const parts = [
+      S.comments.length - shots && `댓글 ${S.comments.length - shots}`,
+      shots && `캡처 ${shots}`,
+      cur().changes.length && `바뀐 것 ${cur().changes.length}`,
+    ].filter(Boolean);
+    const p = ctxProposal();
+    const busy = isBusy(p);
+    const btn = (act, text, cls = "") => `<button class="${cls}" data-prop-act="${act}" data-name="${esc(p.name)}">${text}</button>`;
+    let status = "";
+    if (busy) {
+      const last = (p.activity || []).filter((a) => !a.startsWith("──")).slice(-1)[0] || "시작하는 중";
+      status = `<div class="askst run"><span class="spin"></span><span class="last">${esc(last)}</span>${btn("cancel", "멈추기")}</div>`;
+    } else if (p && p.status === "ready") {
+      const said = ((p.rounds || []).slice(-1)[0] || {}).result || "";
+      status = `${said ? `<button class="askres" data-tab-go="proposals" title="시안 탭에서 자세히">${mdLite(said)}</button>` : ""}
+        <div class="askst ok"><span class="last">다 됐어요${(p.changed || []).length ? ` · 파일 ${p.changed.length}개` : ""}</span>${btn("apply", "반영", "good")}${btn("original", "원래")}${btn("discard", "버리기", "danger")}</div>`;
+    } else if (p && (p.status === "failed" || p.status === "cancelled")) {
+      status = `<div class="askst bad"><span class="last">${esc(p.error || "멈췄어요")}</span>${btn("discard", "버리기", "danger")}</div>`;
+    }
+    const hint = busy ? "Claude 가 고치는 중이에요" : p ? "더 고칠 것을 말해 주세요" : "Claude에게 바로 말하기";
+    return `<footer class="ask">${status}
+      ${parts.length ? `<div class="askmeta">함께 보냄 · ${parts.join(" · ")}</div>` : ""}
+      <div class="askrow"><textarea data-ask rows="2" placeholder="${hint}" ${busy ? "disabled" : ""}>${esc(S.ask)}</textarea>
+        <button class="primary send" data-act="ask-send" ${busy || S.sending ? "disabled" : ""} title="${canRun() ? "보내기 (Enter)" : "모아서 복사 (Enter)"}">${canRun() ? "↑" : "복사"}</button></div>
+    </footer>`;
+  }
+  async function postJson(path, body) {
+    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
+  }
+  // 이번 요청은 Claude 에게 넘어갔다. 화면에 얹어 둔 변경·댓글·캡처를 비운다 (안 비우면 다음 요청에 또 실린다)
+  function clearHandedOff() {
+    [...cur().changes].reverse().filter(isDom).forEach(revertDom);
+    S.variants = [newVariant("조합 A")];
+    S.active = 0;
+    S.comments = [];
+    S.title = "";
+    S.note = "";
+    S.ask = "";
+    S.undo = [];
+    S.redo = [];
+    S.dirty = false;
+    applyCss();
+    clearTimeout(draftTimer);
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* 없어도 된다 */ }
+  }
+  async function askSend() {
+    if (S.sending) return;
+    const box = root.querySelector("[data-ask]");
+    const text = (box ? box.value : S.ask).trim();
+    S.ask = text;
+    if (S.editing) finishTextEdit(true);
+    const p = ctxProposal();
+    if (isBusy(p)) return toast("Claude 가 고치는 중이에요. 끝나면 이어서 말해 주세요");
+    const total = S.variants.reduce((n, v) => n + v.changes.length, 0);
+    if (!text && !S.comments.length && !total) return toast("할 말을 적거나 댓글·캡처를 남겨 주세요");
+    S.sending = true;
+    renderPanel();
+    if (!S.title) S.title = text.split("\n")[0].slice(0, 40) || "바로 말하기";
+    const data = snapshot();
+    data.ask = text;
+    const md = markdown(data);
+    try {
+      const res = await postJson("/__studio/save", { data, markdown: md });
+      if (!res.ok) throw new Error(res.message || "저장하지 못했어요");
+      S.savedAs = res.name;
+      if (!canRun()) {
+        await copy(`${md}\n\n(저장본: ${INFO.requests || ".design-studio/requests"}/${res.name}.md)`);
+        clearHandedOff();
+        render();
+        return toast("모아서 복사했어요. Claude Code 에 붙여 넣으세요");
+      }
+      const revise = !!p && !["applied", "discarded"].includes(p.status);
+      const started = await postJson(`/__studio/proposal/${revise ? "revise" : "start"}`,
+        revise ? { name: INFO.ctx, request: res.name } : { request: res.name, title: S.title });
+      if (!started.ok) throw new Error(started.message || "Claude 에게 넘기지 못했어요");
+      clearHandedOff();
+      if (!revise) return setCtx(started.name, "Claude 가 고치는 대로 화면이 새로 보여요");
+      await refreshProposals();
+      render();
+      toast("Claude 가 이어서 고치기 시작했어요");
+    } catch (err) {
+      toast(`${S.savedAs ? "저장은 했는데 " : ""}${err.message}`);
+    } finally {
+      S.sending = false;
+      renderPanel();
+    }
+  }
+  // 시안을 보는 중에 Claude 가 파일을 고치면 잠깐 모았다가 앱만 새로 띄운다 (보던 화면·테마·스크롤은 이어서).
+  // 쓰는 중인 댓글 창이나 고르기·끌기가 있으면 끝날 때까지 미룬다.
+  let liveStamp = null, liveTimer = 0;
+  function liveReload(p) {
+    const stamp = p.stamp || 0;
+    if (liveStamp === null || !stamp) {
+      liveStamp = stamp || liveStamp;
+      return;
+    }
+    if (stamp === liveStamp) return;
+    liveStamp = stamp;
+    clearTimeout(liveTimer);
+    const tryReload = () => {
+      const typing = root.activeElement && root.activeElement.matches("input, textarea, select");
+      if (!$(".pop").hidden || !$(".modal").hidden || S.editing || S.drag || picker || typing) {
+        liveTimer = setTimeout(tryReload, 1500);
+        return;
+      }
+      setCtx(INFO.ctx, "", true);
+    };
+    liveTimer = setTimeout(tryReload, 1200);
   }
 
   /* ----- 시안: 요청 → Claude 가 복사본에 고침 → 보고 → 반영 / 더 고쳐 줘 / 버리기 ----- */
@@ -689,10 +812,14 @@
   const mdLite = (text) => esc(text)
     .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
     .replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  function setCtx(name, hint = "") {
+  function setCtx(name, hint = "", live = false) {
     // 화면 폴더는 쿠키로 고른다 (studio_server._context). 앱만 다시 불러오면 바깥 틀·패널은 그대로 다시 붙는다.
     document.cookie = name ? `studio_web=${encodeURIComponent(name)}; path=/; SameSite=Lax` : "studio_web=; path=/; max-age=0; SameSite=Lax";
-    try { if (hint) sessionStorage.setItem("studio-hint", hint); } catch { /* 안내만 못 보인다 */ }
+    try {
+      if (hint) sessionStorage.setItem("studio-hint", hint);
+      // 새로 띄운 뒤 같은 화면·테마·스크롤·탭으로 (원래↔시안을 오갈 때 첫 화면으로 돌아가면 비교가 안 됐다)
+      sessionStorage.setItem("studio-restore", JSON.stringify({ view: viewKey(), theme: themeKey(), y: scrollY, tab: S.tab, mode: S.mode === "capture" ? "browse" : S.mode, live }));
+    } catch { /* 이어 보기만 안 된다 */ }
     location.reload();
   }
   let propSig = "";
@@ -705,6 +832,8 @@
     }
     const before = new Map(S.proposals.map((p) => [p.name, p.status]));
     S.proposals = res.items || [];
+    const viewing = ctxProposal();
+    if (viewing) liveReload(viewing);
     for (const p of S.proposals) {
       if (before.get(p.name) === "running" && p.status === "ready") toast(`시안이 다 됐어요: ${p.title || p.name} — 시안 탭에서 보세요`);
       if (before.get(p.name) === "running" && p.status === "failed") toast(`시안 만들기가 실패했어요: ${p.title || p.name}`);
@@ -875,12 +1004,13 @@
 
   function commentsHtml() {
     if (!S.comments.length) {
-      return `<div class="empty"><button class="primary" data-mode="comment">✎ 댓글 달기</button></div>`;
+      return `<div class="empty two"><button class="primary" data-mode="comment">✎ 댓글 달기</button><button data-mode="capture">▣ 캡처</button></div>`;
     }
     return S.comments.map((c) => `
       <div class="cmt ${c.done ? "done" : ""}">
         <div class="chead"><span class="num">${c.n}</span><span class="kind k-${c.kind}">${esc(kindLabel(c.kind))}</span>
-          <span class="where">${esc(viewLabel(c.anchor.view))} · ${esc(c.anchor.label)}${c.region ? " · 영역" : ""}</span></div>
+          <span class="where">${esc(viewLabel(c.anchor.view))} · ${esc(c.anchor.label)}${c.capture ? " · 캡처" : c.region ? " · 영역" : ""}</span></div>
+        ${c.shot ? `<button class="shotbtn" data-shot-view="${c.id}" title="크게 보기"><img class="shotimg" src="${shotUrl(c.shot)}" alt="${c.n}번 캡처"></button>` : ""}
         <div class="ctext">${esc(c.text)}</div>
         <div class="cacts"><button data-cmt-go="${c.id}">보기</button><button data-cmt-edit="${c.id}">고치기</button><button data-cmt-del="${c.id}">지우기</button></div>
       </div>`).join("");
@@ -1104,6 +1234,15 @@
         if (Math.hypot(dx, dy) > 8) startRegionComment(start, e);
         else startPointComment(start.t, e.clientX, e.clientY);
       }
+    } else if (S.mode === "capture") {
+      if (e.type === "pointerdown") pressStart = { x: e.clientX, y: e.clientY, t };
+      if (e.type === "pointerup" && pressStart) {
+        const start = pressStart;
+        pressStart = null;
+        ov.rect.hidden = true;
+        if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8) startCapture(start, { clientX: e.clientX, clientY: e.clientY });
+        else startCapture({ x: 0, y: 0 }, { clientX: innerWidth, clientY: innerHeight }); // 누르기만: 보이는 화면 전체
+      }
     }
   }
   ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "auxclick", "submit"].forEach((t) =>
@@ -1122,7 +1261,7 @@
       setStyle("translate", `${tx}px ${ty}px`);
       return;
     }
-    if (pressStart && S.mode === "comment") {
+    if (pressStart && (S.mode === "comment" || S.mode === "capture")) {
       const x = Math.min(pressStart.x, e.clientX), y = Math.min(pressStart.y, e.clientY);
       const w = Math.abs(e.clientX - pressStart.x), h = Math.abs(e.clientY - pressStart.y);
       if (w + h > 8) {
@@ -1161,10 +1300,15 @@
   }
   function setMode(m) {
     if (S.editing) finishTextEdit(true);
+    const was = S.mode;
     S.mode = m;
     S.hover = null;
     document.documentElement.classList.toggle("__studio-picking", m !== "browse");
-    if (m === "comment" && S.tab !== "comments") S.tab = "comments";
+    if ((m === "comment" || m === "capture") && S.tab !== "comments") S.tab = "comments";
+    // 탭 화면 받기는 누른 그 순간(사용자 동작)에만 허락을 물을 수 있다. 캡처 모드에 들어갈 때 한 번 묻고, 나가면 끊는다
+    // (켜 둔 동안 브라우저 위에 '이 탭 공유 중' 띠가 떠 있다).
+    if (m === "capture" && was !== "capture") startShotStream();
+    if (m !== "capture" && was === "capture") stopShotStream();
     render();
   }
 
@@ -1187,6 +1331,7 @@
     const p = el.parentElement;
     if (p && p !== document.body && p !== document.documentElement) add("parent", "바깥 상자 고르기", "↑");
     add("comment", "댓글 달기", "C");
+    add("capture", "캡처해서 메모", "X");
     if (isTextish(el)) add("text", "글자 고치기", "⏎");
     sep();
     add("color", "글자 색");
@@ -1239,6 +1384,11 @@
     if (id === "select") return pick();
     if (id === "parent") return pick(el.parentElement);
     if (id === "comment") return startPointComment(el, c.x, c.y);
+    if (id === "capture") {
+      // 메뉴를 누른 이 순간이 사용자 동작이라 탭 화면 허락을 물을 수 있다. 그 요소 크기 그대로 찍는다
+      const r = el.getBoundingClientRect();
+      return startCapture({ x: r.left, y: r.top }, { clientX: r.right, clientY: r.bottom });
+    }
     if (id === "text") return pick(), startTextEdit(el);
     if (id === "color" || id === "bg") {
       pick();
@@ -1477,33 +1627,137 @@
       at: { x: r.width ? (x - r.left) / r.width : 0, y: r.height ? (y - r.top) / r.height : 0 },
     }, x, y);
   }
-  function startRegionComment(start, e) {
+  function regionDraft(start, e) {
     const x = Math.min(start.x, e.clientX), y = Math.min(start.y, e.clientY);
     const w = Math.abs(e.clientX - start.x), h = Math.abs(e.clientY - start.y);
     const anchor = containerOf(x, y, w, h);
     const r = anchor.getBoundingClientRect();
-    openCommentPop({
-      anchor: describe(anchor, cssPath(anchor)), _el: anchor,
-      region: { x: (x - r.left) / r.width, y: (y - r.top) / r.height, w: w / r.width, h: h / r.height },
-      regionPx: { w: Math.round(w), h: Math.round(h) },
-      inside: insideOf(anchor, x, y, w, h),
-    }, x + w, y);
+    return {
+      box: { x, y, w, h },
+      draft: {
+        anchor: describe(anchor, cssPath(anchor)), _el: anchor,
+        region: { x: (x - r.left) / r.width, y: (y - r.top) / r.height, w: w / r.width, h: h / r.height },
+        regionPx: { w: Math.round(w), h: Math.round(h) },
+        inside: insideOf(anchor, x, y, w, h),
+      },
+    };
   }
+  function startRegionComment(start, e) {
+    const { box, draft } = regionDraft(start, e);
+    openCommentPop(draft, box.x + box.w, box.y);
+  }
+
+  /* ----- 캡처: 영역을 그림으로 찍어 메모를 단다 → 댓글처럼 모였다가 한 번에 Claude 에게 간다 -----
+     그림은 브라우저의 '탭 화면 공유'(getDisplayMedia, 이 탭 먼저)로 찍는다. 사용자가 지금 보는 그대로(열린 메뉴·스크롤·
+     화면에서 바꾼 것까지)라서 Playwright 로 다시 그리는 것보다 정확하다. 허락을 안 하면 그림 없이 영역·요소만 담는다. */
+  const shot = { stream: null, video: null };
+  async function startShotStream() {
+    if (shot.stream && shot.stream.active) return true;
+    const md = TOP.navigator.mediaDevices;
+    if (!md || !md.getDisplayMedia) {
+      toast("이 브라우저는 화면 찍기를 못 해요. 영역과 메모만 담아요");
+      return false;
+    }
+    try {
+      shot.stream = await md.getDisplayMedia({
+        video: { displaySurface: "browser", frameRate: 10 }, audio: false,
+        preferCurrentTab: true, selfBrowserSurface: "include", surfaceSwitching: "exclude", monitorTypeSurfaces: "exclude",
+      });
+    } catch {
+      shot.stream = null;
+      toast("화면 찍기를 허락하지 않아서 영역과 메모만 담아요");
+      return false;
+    }
+    const video = TOP.document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = shot.stream;
+    shot.video = video;
+    shot.stream.getVideoTracks()[0].addEventListener("ended", () => {
+      shot.stream = null;
+      if (S.mode === "capture") setMode("browse");
+    });
+    try { await video.play(); } catch { /* 첫 장면을 기다리며 다시 해 본다 */ }
+    return true;
+  }
+  function stopShotStream() {
+    if (shot.stream) shot.stream.getTracks().forEach((tr) => tr.stop());
+    shot.stream = null;
+    shot.video = null;
+  }
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  async function grabShot(box) {
+    if (!shot.stream || !shot.stream.active || !shot.video) return null;
+    const v = shot.video;
+    // 다른 창·탭을 골랐으면 잘라 낸 곳이 엉뚱하다. 받은 화면의 비율이 이 탭과 다르면 쓰지 않는다
+    const ratio = v.videoWidth / v.videoHeight, mine = TOP.innerWidth / TOP.innerHeight;
+    if (!v.videoWidth || Math.abs(ratio - mine) / mine > 0.04) {
+      toast("이 탭이 아닌 화면을 골랐어요. 캡처를 다시 눌러 '이 탭'을 골라 주세요");
+      stopShotStream();
+      return null;
+    }
+    // 도구(선택 상자·핀·막대·패널)를 잠깐 감추고, 감춘 뒤의 장면이 공유 화면에 실릴 때까지 기다린다
+    ovHost.style.visibility = "hidden";
+    host.style.visibility = "hidden";
+    try {
+      await nextFrame();
+      if (v.requestVideoFrameCallback) {
+        for (let i = 0; i < 2; i++) await Promise.race([new Promise((r) => v.requestVideoFrameCallback(r)), sleep(400)]);
+      } else await sleep(300);
+      const off = IN_SHELL && window.frameElement ? window.frameElement.getBoundingClientRect() : { left: 0, top: 0 };
+      const sx = v.videoWidth / TOP.innerWidth, sy = v.videoHeight / TOP.innerHeight;
+      const x0 = Math.max(0, (box.x + off.left) * sx), y0 = Math.max(0, (box.y + off.top) * sy);
+      const w0 = Math.min(v.videoWidth - x0, box.w * sx), h0 = Math.min(v.videoHeight - y0, box.h * sy);
+      if (w0 < 4 || h0 < 4) return null;
+      const scale = Math.min(1, 1600 / w0); // 아주 큰 영역은 줄인다 (Claude 가 읽기에 충분하고 파일이 작다)
+      const c = TOP.document.createElement("canvas");
+      c.width = Math.round(w0 * scale);
+      c.height = Math.round(h0 * scale);
+      c.getContext("2d").drawImage(v, x0, y0, w0, h0, 0, 0, c.width, c.height);
+      return { data: c.toDataURL("image/png"), w: c.width, h: c.height };
+    } finally {
+      ovHost.style.visibility = "";
+      host.style.visibility = "";
+    }
+  }
+  async function startCapture(start, end) {
+    const { box, draft } = regionDraft(start, end);
+    draft.capture = true;
+    if (await startShotStream()) {
+      const pic = await grabShot(box);
+      if (pic) {
+        try {
+          const res = await fetch("/__studio/capture", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: pic.data }),
+          }).then((r) => r.json());
+          if (res.ok) draft.shot = { id: res.id, w: pic.w, h: pic.h };
+          else toast(res.message || "그림을 저장하지 못했어요");
+        } catch {
+          toast("그림을 저장하지 못했어요. 영역과 메모만 담아요");
+        }
+      }
+    }
+    if (S.mode !== "capture") stopShotStream(); // 메뉴로 한 장 찍은 경우: 공유 띠를 남기지 않는다
+    openCommentPop(draft, box.x + box.w, box.y);
+  }
+  const shotUrl = (s) => `/__studio/capture?id=${encodeURIComponent(s.id)}`;
   let popDraft = null;
   function openCommentPop(draft, x, y) {
     popDraft = draft;
     const pop = $(".pop");
     const editing = !!draft.id;
+    const what = draft.capture ? "캡처" : "댓글";
     pop.innerHTML = `
-      <div class="phead">${editing ? `${draft.n}번 댓글 고치기` : "댓글"} <small>${esc(draft.anchor.label)}</small></div>
+      <div class="phead">${editing ? `${draft.n}번 ${what} 고치기` : what} <small>${esc(draft.anchor.label)}</small></div>
+      ${draft.shot ? `<img class="shotimg" src="${shotUrl(draft.shot)}" alt="캡처한 화면">` : ""}
       <div class="kinds">${KINDS.map(([k, l]) => `<button data-kind="${k}" class="${(draft.kind || "fix") === k ? "on" : ""}">${l}</button>`).join("")}</div>
-      <textarea rows="4" placeholder="무엇을 어떻게? (예: 글자가 작아요)">${esc(draft.text || "")}</textarea>
+      <textarea rows="${draft.shot ? 3 : 4}" placeholder="${draft.capture ? "메모 (예: 여기 너무 빽빽해요)" : "무엇을 어떻게? (예: 글자가 작아요)"}">${esc(draft.text || "")}</textarea>
       <div class="pacts">${editing ? `<label class="chk"><input type="checkbox" data-done ${draft.done ? "checked" : ""}> 해결됨</label>` : ""}
         <span class="sp"></span><button data-pop="cancel">그만두기</button><button class="primary" data-pop="ok">달기 (Ctrl+Enter)</button></div>`;
     pop.hidden = false;
     ({ x, y } = toTop(x, y));
     const W = TOP.innerWidth, H = TOP.innerHeight;
-    const pw = 320, ph = 230;
+    const pw = 320, ph = draft.shot ? 230 + Math.min(180, 296 * draft.shot.h / Math.max(1, draft.shot.w)) : 230;
     pop.style.left = `${Math.max(8, Math.min(W - pw - 8, x + 12))}px`;
     pop.style.top = `${Math.max(8, Math.min(H - ph - 8, y - 20))}px`;
     pop.querySelector("textarea").focus();
@@ -1514,7 +1768,7 @@
       const text = pop.querySelector("textarea").value.trim();
       const kind = (pop.querySelector("[data-kind].on") || {}).dataset?.kind || "fix";
       const done = !!pop.querySelector("[data-done]")?.checked;
-      if (!text) return toast("댓글 내용을 적어 주세요");
+      if (!text && !popDraft.shot) return toast("댓글 내용을 적어 주세요");
       if (popDraft.id) {
         Object.assign(S.comments.find((c) => c.id === popDraft.id), { text, kind, done });
       } else {
@@ -2028,14 +2282,16 @@
     L.push(`- 고른 조합: **${v.name}** (조합 ${data.variants.length}개)`);
     L.push(`- 재량: ${data.freedom === "exact" ? "적은 그대로만 옮겨 주세요" : "뜻을 살려 더 다듬어도 좋아요 (어울리게 조정·주변 정리 허용)"}`);
     L.push(`- 원본 데이터: \`${INFO.requests || ".design-studio/requests"}/<이 파일 이름>.json\``, "");
+    if (data.ask) L.push("## 사용자가 한 말", "", data.ask, "");
     if (data.note) L.push("## 전체 메모", "", data.note, "");
     if (data.comments.length) {
-      L.push(`## 댓글 ${data.comments.length}개`, "");
+      L.push(`## 댓글·캡처 ${data.comments.length}개`, "");
       for (const c of data.comments) {
         L.push(`${c.n}. **[${kindLabel(c.kind)}]** ${c.text}${c.done ? " _(해결됨)_" : ""}`);
         L.push(`   - 화면: ${viewLabel(c.anchor.view)} · 요소 \`${c.anchor.label}\`${c.anchor.text ? ` “${c.anchor.text.slice(0, 50)}”` : ""} · ${c.anchor.size}`);
         L.push(`   - 선택자: \`${c.anchor.path}\` (같은 모양: \`${c.anchor.selector}\`)`);
         if (c.region) L.push(`   - 영역: 그 요소 안 약 ${c.regionPx.w}×${c.regionPx.h}px. 안에 든 것: ${c.inside.map((i) => `\`${i.label}\`${i.text ? ` “${i.text}”` : ""}`).join(", ") || "-"}`);
+        if (c.shot) L.push(`   - 캡처 그림: \`${INFO.captures || ".design-studio/captures"}/${c.shot.id}.png\` (사용자가 가리킨 그 화면 — Read 로 열어 본다)`);
         if (c.anchor.rules.length) L.push(`   - 걸린 CSS 규칙: ${c.anchor.rules.map((r) => `\`${r}\``).join(", ")}`);
         if (c.variant !== v.name) L.push(`   - (조합 '${c.variant}'를 보며 단 댓글)`);
       }
@@ -2144,15 +2400,7 @@
         }).then((r) => r.json());
         if (!started.ok) throw new Error(started.message || "시안을 시작하지 못했어요");
         // 이번 요청은 Claude 에게 넘어갔다. 화면에 얹어 둔 변경·댓글은 비우고 시안 탭에서 진행을 본다.
-        [...cur().changes].reverse().filter(isDom).forEach(revertDom);
-        S.variants = [newVariant("조합 A")];
-        S.active = 0;
-        S.comments = [];
-        S.title = "";
-        S.note = "";
-        S.undo = [];
-        S.redo = [];
-        applyCss();
+        clearHandedOff();
         $(".modal").hidden = true;
         S.mode = "browse";
         document.documentElement.classList.remove("__studio-picking");
@@ -2218,6 +2466,8 @@
     c.n = Math.round(num(c.n));
     if (!KINDS.some((k) => k[0] === c.kind)) c.kind = KINDS[0][0];
     if (c.region) c.region = { x: num(c.region.x), y: num(c.region.y), w: num(c.region.w), h: num(c.region.h) };
+    c.shot = c.shot && /^\d{8}-\d{6}-[0-9a-f]{6}$/.test(c.shot.id || "") ? { id: c.shot.id, w: num(c.shot.w), h: num(c.shot.h) } : null;
+    c.capture = !!c.capture;
     c.at = { x: num(c.at?.x), y: num(c.at?.y) };
     return c;
   }
@@ -2267,6 +2517,17 @@
     if (!b) return;
     const d = b.dataset;
     if (d.mode) return setMode(d.mode);
+    if (d.act === "ask-send") return askSend();
+    if (d.shotView) {
+      const c = S.comments.find((x) => x.id === d.shotView);
+      if (!c || !c.shot) return;
+      const m = $(".modal");
+      m.innerHTML = `<div class="card wide"><h3>${c.n}번 캡처 <small>${esc(viewLabel(c.anchor.view))} · ${esc(c.anchor.label)}</small></h3>
+        <img class="shotbig" src="${shotUrl(c.shot)}" alt="${c.n}번 캡처"><p>${esc(c.text)}</p>
+        <div class="macts"><button data-cmt-edit="${c.id}">메모 고치기</button><button data-modal="close">닫기</button></div></div>`;
+      m.hidden = false;
+      return;
+    }
     if (d.tab) {
       S.tab = d.tab;
       renderPanel();
@@ -2335,6 +2596,7 @@
     }
     if (d.cmtEdit || d.pin) {
       const c = S.comments.find((x) => x.id === (d.cmtEdit || d.pin));
+      $(".modal").hidden = true;
       const r = b.getBoundingClientRect();
       if (b.getRootNode() === ovRoot) return openCommentPop({ ...c }, r.right, r.top);
       const o = toTop(0, 0);
@@ -2485,6 +2747,10 @@
   root.addEventListener("input", (e) => {
     const t = e.target;
     const d = t.dataset;
+    if ("ask" in d) {
+      S.ask = t.value;
+      return;
+    }
     if (d.tokenPx) {
       t.nextElementSibling.textContent = `${t.value}px`;
       return setToken(d.tokenPx, `${t.value}px`);
@@ -2563,6 +2829,10 @@
       }
       return;
     }
+    if (fromStudio(e) && t && t.matches && t.matches("[data-ask]") && e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      return askSend();
+    }
     if (fromStudio(e) && t && t.matches && t.matches("textarea") && e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       if (!$(".pop").hidden) closePop(true);
@@ -2595,6 +2865,7 @@
     if (k === "v") return handled(), setMode("browse");
     if (k === "s") return handled(), setMode("select");
     if (k === "c") return handled(), setMode("comment");
+    if (k === "x") return handled(), setMode("capture");
     if (k === "\\") {
       S.clean = !S.clean;
       return handled(), render();
@@ -2669,9 +2940,23 @@
         if (draft && (draft.comments?.length || draft.variants?.some((v) => v.changes.length))) {
           hydrate(draft);
           S.dirty = true;
-          toast("저장하지 않은 지난 작업을 이어서 열었어요 (바뀐 것 탭에서 비울 수 있어요)");
+          let live = false;
+          try { live = JSON.parse(sessionStorage.getItem("studio-restore") || "{}").live; } catch { /* 알림만 뜬다 */ }
+          if (!live) toast("저장하지 않은 지난 작업을 이어서 열었어요 (바뀐 것 탭에서 비울 수 있어요)");
         }
       } catch { /* 이어 하기만 안 된다 */ }
+    }
+    let restore = null;
+    try {
+      restore = JSON.parse(sessionStorage.getItem("studio-restore") || "null");
+      sessionStorage.removeItem("studio-restore");
+    } catch { /* 이어 보기만 안 된다 */ }
+    if (restore && !PARAMS.get("view")) {
+      if (restore.theme) applyAppTheme(restore.theme);
+      if (restore.view && APP.switchView && restore.view !== viewKey()) APP.switchView(restore.view);
+      if (restore.tab) S.tab = restore.tab;
+      if (restore.mode && restore.mode !== S.mode) setMode(restore.mode);
+      if (restore.y) setTimeout(() => scrollTo(0, restore.y), 300);
     }
     if (PARAMS.get("variant")) switchVariant(+PARAMS.get("variant") - 1);
     if (PARAMS.get("theme")) applyAppTheme(PARAMS.get("theme"));
@@ -2932,6 +3217,26 @@
       .st { font-size: 10.5px; padding: 1px 7px; border-radius: 6px; background: var(--s-bg3); white-space: nowrap; }
       .st-run { color: var(--s-acc-hi); } .st-ok { color: var(--s-ok-hi); } .st-bad { color: var(--s-acc-hi); } .st-done { color: var(--s-soft); }
       .prop .meta { color: var(--s-soft); font-size: 11px; margin: 3px 0 6px; }
+      /* 패널 아래 '바로 말하기' (늘 보인다) */
+      .ask { border-top: 1px solid var(--s-line); padding: 8px 10px 10px; background: var(--s-bg); border-radius: 0 0 14px 14px; }
+      .askst { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; font-size: 11.5px; }
+      .askst .last { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--s-soft); }
+      .askst.ok .last { color: var(--s-ok-hi); } .askst.bad .last { color: var(--s-acc-hi); white-space: normal; }
+      .askst button { padding: 3px 8px; margin: 0 !important; font-size: 11.5px; }
+      .askres { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; width: 100%; text-align: left;
+        margin: 0 0 7px; padding: 6px 8px !important; font-size: 11.5px; line-height: 1.45; color: var(--s-text); background: var(--s-bg2); }
+      .askmeta { font-size: 11px; color: var(--s-soft); margin: 0 2px 5px; }
+      .askrow { display: flex; gap: 6px; align-items: flex-end; }
+      .askrow textarea { flex: 1; resize: none; min-height: 40px; max-height: 120px; background: var(--s-well); border: 1px solid var(--s-line); border-radius: 9px; padding: 7px 9px; }
+      .askrow textarea:focus { outline: none; border-color: var(--s-acc); }
+      .askrow textarea:disabled { opacity: .55; }
+      .askrow .send { min-width: 40px; height: 40px; border-radius: 9px; font-size: 15px; }
+      .askrow .send:disabled { opacity: .45; cursor: default; }
+      /* 캡처 그림 */
+      .shotimg { display: block; max-width: 100%; max-height: 180px; margin: 6px 0; border: 1px solid var(--s-line); border-radius: 6px; background: #fff; }
+      .shotbtn { display: block; padding: 0 !important; border: 0 !important; background: none !important; }
+      .shotbig { display: block; max-width: 100%; max-height: 62vh; margin: 8px auto; border: 1px solid var(--s-line); border-radius: 8px; background: #fff; }
+      .empty.two { display: flex; gap: 8px; }
       .act { font: 11px/1.5 ui-monospace, Consolas, monospace; color: var(--s-soft); background: var(--s-well); border-radius: 6px; padding: 6px 8px; max-height: 160px; overflow: auto; }
       .act div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .res { white-space: pre-wrap; background: var(--s-well); border-radius: 6px; padding: 8px; margin: 6px 0; max-height: 220px; overflow: auto; }
