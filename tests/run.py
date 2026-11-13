@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -405,6 +406,169 @@ def capture_ask_checks() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def artifact_checks() -> None:
+    """작업물 모드: 웹 앱이 아닌 파일(글·코드·표·그림·PDF·Word·PowerPoint·Excel)을 자동으로 알아보고
+    위치가 붙은 댓글·글자 고치기 → 보낼 목록에 담기 → 한 번에 보내기(차례로 같은 대화) → 첨부."""
+    from playwright.sync_api import sync_playwright
+    sys.path.insert(0, str(ROOT / "tests"))
+    from fixtures import make_all
+
+    tmp = Path(tempfile.mkdtemp(prefix="studio-art-"))
+    procs: list[subprocess.Popen] = []
+    try:
+        art = tmp / "art"
+        make_all(art)
+        log = tmp / "prompts.log"
+        env = {**os.environ, "STUDIO_WORK": str(tmp / "work"), "STUDIO_CLAUDE": str(ROOT / "tests" / "fake_claude.py"),
+               "FAKE_CLAUDE_LOG": str(log), "FAKE_CLAUDE_FILE": "notes.md", "FAKE_CLAUDE_DELAY": "0.5", "PYTHONIOENCODING": "utf-8"}
+
+        def launch(args: list[str], port: int) -> str:
+            proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "studio", "open", *args, "--no-open", "--port", str(port)],
+                                    cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+            procs.append(proc)
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if line.startswith("디자인 스튜디오") and "http://" in line:
+                    return line[line.index("http://"):].strip()
+            return ""
+
+        url = launch([str(art)], 8941)
+        if not url:
+            return check("작업물: 스튜디오 띄우기", False)
+
+        def frame(q: str) -> str:
+            with urllib.request.urlopen(url + "?frame=1&" + q) as r:
+                return r.read().decode("utf-8")
+        refs = {f: frame("file=" + urllib.parse.quote(f)).count("data-ref=") for f in
+                ("notes.md", "calc.py", "scores.csv", "picture.png", "report.docx", "slides.pptx", "table.xlsx")}
+        check("작업물: 형식마다 위치가 붙은 보기 화면 (md·코드·csv·그림·docx·pptx·xlsx)", all(v >= 1 for v in refs.values())
+              and refs["scores.csv"] >= 6 and refs["slides.pptx"] >= 4, json.dumps(refs, ensure_ascii=False))
+        check("작업물: 폴더 밖 파일은 못 엶", "root:" not in frame("file=../../../../etc/passwd"))
+        has_pages = bool(shutil.which("pdftoppm"))
+        if has_pages:
+            try:
+                with urllib.request.urlopen(url + "__studio/page?file=paper.pdf&n=1") as r:
+                    ok = r.headers.get("Content-Type") == "image/png" and r.read(8).startswith(b"\x89PNG")
+            except urllib.error.HTTPError:
+                ok = False
+            check("작업물: PDF 쪽을 그림으로", ok)
+
+        host = "document.querySelector('#__studio').shadowRoot"
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={"width": 1440, "height": 900}, locale="ko-KR")
+            errors: list[str] = []
+            pg.on("pageerror", lambda e: errors.append(str(e)[:160]))
+            pg.on("console", lambda m: errors.append("console: " + m.text[:160]) if m.type == "error" else None)
+            pg.on("dialog", lambda d: d.accept())
+            pg.goto(url + "?file=notes.md")
+            pg.wait_for_timeout(2000)
+            fr = pg.main_frame.child_frames[0]
+            app = pg.frame_locator("#app")
+            info = fr.evaluate("() => window.__STUDIO__.artifact")
+            tabs = pg.evaluate(f"() => [...{host}.querySelectorAll('[data-tab]')].map(b => b.dataset.tab)")
+            check("작업물: 마크다운을 알아보고 작업물 탭", info and info["kind"] == "markdown" and tabs[0] == "files", f"{info and info['kind']} {tabs[:2]}")
+
+            # 댓글: 둘째 문단(3~4번째 줄)
+            pg.keyboard.press("c")
+            box = app.locator("p", has_text="첫 문단").bounding_box()
+            pg.mouse.click(box["x"] + 10, box["y"] + 6)
+            pg.wait_for_timeout(300)
+            pg.locator(".pop textarea").fill("이 문단을 한 줄로")
+            pg.keyboard.press("Control+Enter")
+            pg.wait_for_timeout(300)
+            # 글자 고치기: 목록 첫 줄(6번째 줄)
+            pg.keyboard.press("s")
+            li = app.locator("li", has_text="할 일 하나").bounding_box()
+            pg.mouse.dblclick(li["x"] + 10, li["y"] + 6)
+            pg.wait_for_timeout(200)
+            pg.keyboard.press("End")
+            pg.keyboard.type(" (급함)")
+            pg.keyboard.press("Enter")
+            pg.wait_for_timeout(300)
+            # 보낼 목록에 담기(Ctrl+Enter) → 둘째 요청을 쓰고 보내기(Enter): 두 요청이 차례로 같은 대화에서
+            pg.evaluate(f"() => {host}.querySelector('[data-ask]').focus()")
+            pg.keyboard.type("표는 그대로 둬")
+            pg.keyboard.press("Control+Enter")
+            pg.wait_for_timeout(300)
+            queued = pg.evaluate(f"() => {host}.querySelectorAll('.aqi').length")
+            check("보낼 목록: 담으면 목록에 쌓이고 화면은 비워짐", queued == 1 and fr.evaluate("() => 1") == 1, f"{queued}개")
+            pg.evaluate(f"() => {host}.querySelector('[data-ask]').focus()")
+            pg.keyboard.type("제목에 날짜를 붙여")
+            pg.keyboard.press("Enter")
+            entries = []
+            for _ in range(60):
+                pg.wait_for_timeout(500)
+                entries = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()] if log.is_file() else []
+                if len(entries) >= 2:
+                    break
+            check("보낼 목록: 한 번에 보내면 차례로 같은 대화(--resume)에서", [e["resume"] for e in entries] == [False, True],
+                  str([e["resume"] for e in entries]))
+            # 두 요청이 같은 초에 저장되어 이름 순서로는 고를 수 없다. 담아 둔 첫 요청을 글로 찾는다
+            texts = [r.read_text(encoding="utf-8") for r in (tmp / "work").glob("art-*/requests/*.md")]
+            first = next((x for x in texts if "표는 그대로 둬" in x), "")
+            check("작업물 요청 글에 원본 위치 (몇째 줄)", "3~4번째 줄" in first and "6번째 줄" in first and "(급함)" in first
+                  and "작업물 수정 요청" in first and len(texts) == 2, f"저장본 {len(texts)}개")
+            check("작업물: Claude 에게 원본 위치를 알려 줌", bool(entries) and "작업물 수정 요청" in entries[0]["prompt"])
+            text = ""
+            for _ in range(30):
+                pg.wait_for_timeout(500)
+                try:
+                    text = fr.evaluate("() => document.body.innerText")
+                except Exception:  # noqa: BLE001 — 새로 뜨는 중
+                    continue
+                if "rgb(4, 5, 6)" in text:
+                    break
+            check("작업물: Claude 가 고치는 대로 보기 화면이 새로 보임", "고친 줄 rgb(1, 2, 3)" in text and "고친 줄 rgb(4, 5, 6)" in text)
+
+            # 그림: 끌어서 영역 댓글 → 원본 픽셀 좌표 / 글자 파일이 아니면 '복사' 로
+            pg.goto(url + "?file=picture.png")
+            pg.wait_for_timeout(1500)
+            fr = pg.main_frame.child_frames[0]
+            img = pg.frame_locator("#app").locator("img").bounding_box()
+            pg.keyboard.press("c")
+            pg.mouse.move(img["x"] + img["width"] * 0.25, img["y"] + img["height"] * 0.25)
+            pg.mouse.down()
+            pg.mouse.move(img["x"] + img["width"] * 0.6, img["y"] + img["height"] * 0.6, steps=4)
+            pg.mouse.move(img["x"] + img["width"] * 0.75, img["y"] + img["height"] * 0.75, steps=4)
+            pg.mouse.up()
+            pg.wait_for_timeout(300)
+            pg.locator(".pop textarea").fill("여기를 밝게")
+            pg.keyboard.press("Control+Enter")
+            pg.wait_for_timeout(300)
+            label = pg.evaluate(f"() => {host}.querySelector('[data-act=ask-send]').textContent.trim()")
+            check("작업물: 그림은 Claude 가 바로 못 고쳐 '복사' 로 보냄", label.startswith("복사"), label)
+            pg.evaluate(f"() => {host}.querySelector('[data-act=ask-send]').click()")
+            pg.wait_for_timeout(1200)
+            reqs = sorted((tmp / "work").glob("art-*/requests/*.md"))
+            last = reqs[-1].read_text(encoding="utf-8") if reqs else ""
+            check("작업물: 그림 영역을 원본 픽셀로 적음 (120×80 그림)", "그림 안 영역: x 30~90px, y 20~60px (원본 120×80)" in last,
+                  next((l for l in last.splitlines() if "그림 안" in l), "")[:80])
+            check("작업물: 콘솔 오류 0", not errors, "; ".join(errors[:3]))
+            b.close()
+
+        # 받은 편지함: 파일 없이 열고 끌어 놓듯 첨부
+        inbox = launch([], 8951)
+        import base64
+        payload = json.dumps({"name": "../메모.csv", "data": "data:text/csv;base64," + base64.b64encode("a,b\n1,2\n".encode()).decode()}).encode()
+        s, res = post(inbox + "__studio/attach", payload)
+        saved = tmp / "work" / "inbox" / "files" / "메모.csv"
+        with urllib.request.urlopen(inbox + "?frame=1&file=" + urllib.parse.quote("메모.csv")) as r:
+            shown = r.read().decode("utf-8").count('data-ref="B2"')
+        check("받은 편지함: 첨부하면 저장되고(경로 문자는 지움) 바로 표로 보임", s == 200 and saved.is_file() and shown == 1, str(res))
+        s, _ = post(url + "__studio/attach", payload)
+        check("첨부는 받은 편지함에서만 (남의 폴더에 쓰지 않음)", s == 400)
+    finally:
+        for proc in procs:
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> None:
     if WORK.exists():
         shutil.rmtree(WORK)
@@ -420,6 +584,7 @@ def main() -> None:
         proc.terminate()
         proc.wait(10)
     capture_ask_checks()
+    artifact_checks()
     apply_checks()
     if name:
         snapshot_check(name)

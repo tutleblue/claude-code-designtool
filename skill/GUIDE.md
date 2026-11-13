@@ -86,12 +86,27 @@ python <도구>/run_studio.py --project <앱> --mode real    # 내 데이터 (�
   - claude 가 없으면 모은 내용을 복사해 준다. Claude Code 에 붙여 넣으면 된다(3).
 - **저장해서 Claude에게** → **저장하고 시안 만들기**(4) 또는 **저장만**(3).
 
+## 2-1. 작업물 열기 (웹 앱이 아닌 것: 개인화 필요 없음)
+
+```
+python <도구>/run_studio.py open <파일 또는 폴더>   # 형식을 알아서 본다
+python <도구>/run_studio.py open                    # 받은 편지함: 파일을 끌어 놓아 첨부
+```
+- 알아보는 형식: 마크다운·글·코드·JSON·CSV/TSV·그림·SVG·PDF·Word(docx)·PowerPoint(pptx)·Excel(xlsx)·소리·영상·HTML. 폴더면 목록부터.
+- 스튜디오가 형식마다 보기 화면을 만들고, 덩어리마다 **원본 위치**(몇째 줄·문단·슬라이드 상자·시트 칸·쪽·재생 초)를 붙인다. 댓글·캡처·글자 고치기에 그 위치가 함께 저장된다.
+- PDF·Office 의 '쪽 모양'은 pdftoppm 이나 PyMuPDF, Office 는 LibreOffice 가 있을 때만 그림으로 나온다. 없어도 글 구조로는 보인다.
+- 저장본·시안·캡처는 원본 옆이 아니라 `~/.claude/design-studio/work/<이름-해시>/` 에 쌓인다.
+- 글자 파일(md·코드·json·csv·svg·html)은 웹 앱처럼 시안(복사본)을 Claude 가 고치고 화면이 바로 새로 보인다. docx·pptx·xlsx·pdf·그림·소리·영상은 Claude CLI 가 바로 못 고치므로 '복사'로 모아 그 작업물을 만든 AI(또는 원본을 만든 스크립트를 가진 세션)에 붙여 넣는다.
+
+사용자에게 알려 줄 것: **바로 말하기** 칸의 **＋ 담기**(Ctrl+Enter)로 요청을 여러 개 목록에 담고, ↑(Enter)로 한 번에 보낸다. Claude 는 같은 대화에서 하나씩 차례로 고친다. **Claude / 복사** 로 보낼 곳을 고른다.
+
 ## 3. 저장본 반영
 
 1. `context.md`(앱 규칙)를 먼저 읽는다.
 2. 저장본을 고른다.
    - 이름을 말했으면 그것을 쓴다.
-   - 아니면 `<앱>/.design-studio/requests/` 바로 아래에서 가장 최근 것을 쓴다.
+   - 아니면 `<앱>/.design-studio/requests/` 바로 아래에서 가장 최근 것을 쓴다. 작업물 모드는 `~/.claude/design-studio/work/<이름-해시>/requests/`.
+   - 요청 글 머리에 `작업물:` 이 있으면 작업물이다. 표 아래 규칙 대신 각 항목의 '위치'(줄·문단·슬라이드·칸·쪽·초)의 원본을 고친다.
    - `.md`를 먼저 읽고, 애매하면 `.json`을 본다. 반영할 조합은 `variants[chosen]`이다.
 3. 사용자가 본 화면을 본다. 앱 저장소 폴더에서:
    ```

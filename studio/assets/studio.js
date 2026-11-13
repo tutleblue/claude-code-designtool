@@ -14,6 +14,10 @@
   const INFO = window.__STUDIO__ || {};
   // 시안을 보며 단 댓글과 원래 화면에서 단 댓글은 따로 이어 한다
   const APP = window.__STUDIO_APP__ || {};
+  // 작업물 모드 (studio/artifacts.py): 웹 앱이 아닌 파일. DOC 는 스튜디오가 만든 보기 화면(글·표·그림·문서…)이라
+  // 화면의 CSS 를 바꾸는 도구(색·크기·옮기기·AI 추천)는 뜻이 없다. 댓글·캡처·글자 고치기·말하기만 쓴다.
+  const ART = INFO.artifact || null;
+  const DOC = !!ART && ART.kind !== "html";
   const APP_KEY = String(INFO.app || "app").replace(/[^\w가-힣-]/g, "");
   const DRAFT_KEY = `studio-draft-v1:${APP_KEY}` + (INFO.ctx ? `:${INFO.ctx}` : "");
   const PARAMS = new URLSearchParams(location.search);
@@ -58,6 +62,9 @@
     proposals: [], // 시안 목록 (서버에서 2.5초마다)
     ask: "", // 패널 아래 '바로 말하기' 칸에 쓰는 중인 글
     sending: false,
+    queue: [], // 보낼 목록: [{ id, title, data, md }] — 여러 요청을 담았다가 한 번에 (차례로 같은 대화에서)
+    dest: loadPref("dest", "claude"), // 보낼 곳: claude(바로 고침) · copy(복사해 다른 AI 에)
+    files: [], // 작업물 폴더의 파일 목록
     drag: null, // 고른 요소를 직접 끌어 옮기는 중
     justDragged: false,
     demoing: false, // 동작 흐름·추천 시연 중 (앱이 누르기를 그대로 받는다)
@@ -65,6 +72,7 @@
     ai: { status: "idle", open: false, job: null, items: [], idx: 0, ask: "", lastAt: 0, auto: loadPref("ai-auto", true) },
   };
   const cur = () => S.variants[S.active];
+  if (DOC) S.ai.auto = false; // 보기 화면의 CSS 를 고치자는 추천은 작업물에 뜻이 없다
   function loadPref(key, fallback) {
     try {
       const v = localStorage.getItem(`studio-${key}`);
@@ -88,6 +96,7 @@
   };
   const themeLabel = (k) => (THEMES.find((t) => t.key === k) || { label: k }).label;
   const viewKey = () => {
+    if (ART) return ART.file || "목록";
     try { return (APP.currentView && APP.currentView()) || "page"; } catch { return "page"; }
   };
   const viewLabel = (v) => VIEW_LABEL[v] || v;
@@ -268,15 +277,29 @@
   }
   function describe(el, scope) {
     const r = el.getBoundingClientRect();
-    return {
+    const out = {
       selector: scope || (scopeOptions(el)[0] || {}).sel || cssPath(el),
       path: cssPath(el),
       label: shortLabel(el),
       text: textOf(el),
-      rules: matchedRules(el),
+      rules: DOC ? [] : matchedRules(el),
       view: viewKey(),
       size: `${Math.round(r.width)}×${Math.round(r.height)}`,
     };
+    // 작업물: 보기 화면이 붙여 둔 원본 위치 (몇째 줄·문단·쪽·칸). 소리·영상은 지금 재생 위치, 그림은 원래 크기
+    const refEl = el.closest && el.closest("[data-ref]");
+    if (refEl) {
+      out.ref = refEl.dataset.ref;
+      out.refLabel = refEl.dataset.refLabel || refEl.dataset.ref;
+      if (refEl.matches("video, audio")) {
+        const s = refEl.currentTime || 0;
+        out.refLabel = `${Math.floor(s / 60)}분 ${(s % 60).toFixed(1)}초`;
+        out.ref = `t=${s.toFixed(1)}`;
+      }
+    }
+    const img = el.matches && el.matches("img[data-natural]") ? el : null;
+    if (img && img.naturalWidth) out.natural = { w: img.naturalWidth, h: img.naturalHeight };
+    return out;
   }
   function resolve(target, cached) {
     if (cached && cached.isConnected) return cached;
@@ -512,7 +535,7 @@
   };
   ovRoot.innerHTML = `
     <style>${STUDIO_CSS()}</style>
-    <div class="ov" part="overlay">
+    <div class="ov ${DOC ? "doc" : ""}" part="overlay">
       <div class="hover" hidden><span class="tag"></span></div>
       <div class="selbox" hidden>
         <span class="tag"></span>
@@ -568,9 +591,9 @@
       <div class="grp">
         <button class="icon" data-act="undo" title="되돌리기 Ctrl+Z">↶</button>
         <button class="icon" data-act="redo" title="다시 하기 Ctrl+Shift+Z">↷</button>
-        ${INFO.claude ? `<button class="icon ai-btn" data-ai="open" title="AI 추천">✨</button>` : ""}
+        ${INFO.claude && !DOC ? `<button class="icon ai-btn" data-ai="open" title="AI 추천">✨</button>` : ""}
       </div>
-      <div class="grp variants" title="조합 비교 · 숫자 키">
+      <div class="grp variants" title="조합 비교 · 숫자 키" ${DOC ? "hidden" : ""}>
         ${S.variants.map((v, i) => `<button class="vpill ${i === S.active ? "on" : ""}" data-variant="${i}" title="${esc(v.name)} · 바꾼 것 ${v.changes.length}">${esc(v.name.replace(/^조합\s*/, "")) || i + 1}</button>`).join("")}
         <button class="icon" data-act="variant-dup" title="조합 복사">＋</button>
       </div>
@@ -633,12 +656,13 @@
         <div class="brand">${esc(INFO.app || "디자인 스튜디오")}${INFO.mode === "real" ? ` <small>내 데이터</small>` : ""}</div>
         <button class="icon" data-act="swap-side" title="패널 위치 바꾸기">⇄</button>
       </header>
-      <nav>${tab("palette", "색·테마")}${tab("element", "요소")}${tab("comments", "댓글", S.comments.length)}${tab("changes", "바뀐 것", cur().changes.length)}${tab("proposals", "시안", S.proposals.filter((p) => !["applied", "discarded"].includes(p.status)).length || null)}</nav>
+      <nav>${DOC ? tab("files", "작업물") : tab("palette", "색·테마")}${tab("element", DOC ? "고른 곳" : "요소")}${tab("comments", "댓글", S.comments.length)}${tab("changes", "바뀐 것", cur().changes.length)}${tab("proposals", "시안", S.proposals.filter((p) => !["applied", "discarded"].includes(p.status)).length || null)}</nav>
       <div class="body">${panelBody()}</div>
       ${askHtml()}`;
     if (S.tab === "changes") fillSaved();
   }
   function panelBody() {
+    if (S.tab === "files" || (DOC && S.tab === "palette")) return filesHtml();
     if (S.tab === "palette") return paletteHtml();
     if (S.tab === "element") return elementHtml();
     if (S.tab === "comments") return commentsHtml();
@@ -651,7 +675,9 @@
      이어서 보내는 말은 같은 Claude 대화(--resume)로 간다. claude 가 없으면 모은 내용을 복사해 Claude Code 에 붙이게 한다. */
   const ctxProposal = () => (INFO.ctx ? S.proposals.find((p) => p.name === INFO.ctx) : null);
   const isBusy = (p) => !!p && (p.status === "running" || p.status === "queued");
-  const canRun = () => INFO.claude && INFO.proposals !== false;
+  // Claude CLI 가 바로 고칠 수 있나: claude 가 있고, 시안을 켜 두었고, 작업물이면 글자 파일(또는 폴더)일 때
+  const claudeCan = () => INFO.claude && INFO.proposals !== false && (!ART || ART.editable || !ART.file);
+  const canRun = () => claudeCan() && S.dest !== "copy";
   function askHtml() {
     if (INFO.snapshot) return "";
     const shots = S.comments.filter((c) => c.capture).length;
@@ -666,7 +692,7 @@
     let status = "";
     if (busy) {
       const last = (p.activity || []).filter((a) => !a.startsWith("──")).slice(-1)[0] || "시작하는 중";
-      status = `<div class="askst run"><span class="spin"></span><span class="last">${esc(last)}</span>${btn("cancel", "멈추기")}</div>`;
+      status = `<div class="askst run"><span class="spin"></span><span class="last">${esc(last)}</span>${p.queue ? `<span class="tag">남은 ${p.queue}</span>` : ""}${btn("cancel", "멈추기")}</div>`;
     } else if (p && p.status === "ready") {
       const said = ((p.rounds || []).slice(-1)[0] || {}).result || "";
       status = `${said ? `<button class="askres" data-tab-go="proposals" title="시안 탭에서 자세히">${mdLite(said)}</button>` : ""}
@@ -674,17 +700,26 @@
     } else if (p && (p.status === "failed" || p.status === "cancelled")) {
       status = `<div class="askst bad"><span class="last">${esc(p.error || "멈췄어요")}</span>${btn("discard", "버리기", "danger")}</div>`;
     }
-    const hint = busy ? "Claude 가 고치는 중이에요" : p ? "더 고칠 것을 말해 주세요" : "Claude에게 바로 말하기";
-    return `<footer class="ask">${status}
-      ${parts.length ? `<div class="askmeta">함께 보냄 · ${parts.join(" · ")}</div>` : ""}
+    // 보낼 목록: 담아 둔 요청들. ↑ 를 누르면 담은 것 + 지금 것을 차례로 한 번에 보낸다
+    const queue = S.queue.length ? `<div class="aq">${S.queue.map((q, i) => `<div class="aqi"><b>${i + 1}</b><span>${esc(q.title)}</span>
+        <small>${esc(q.meta || "")}</small><button class="mini" data-q-del="${esc(q.id)}" title="빼기">✕</button></div>`).join("")}</div>` : "";
+    const dest = claudeCan()
+      ? `<div class="seg dest"><button data-dest="claude" class="${S.dest !== "copy" ? "on" : ""}" title="Claude CLI 가 복사본을 바로 고쳐 보여 줘요">Claude</button><button data-dest="copy" class="${S.dest === "copy" ? "on" : ""}" title="모아서 복사 — 다른 AI 에 붙여 넣기">복사</button></div>`
+      : "";
+    const hint = busy ? "Claude 가 고치는 중이에요" : p ? "더 고칠 것을 말해 주세요" : canRun() ? "Claude에게 바로 말하기" : "할 말 (모아서 복사해요)";
+    const n = S.queue.length;
+    return `<footer class="ask">${status}${queue}
+      ${parts.length || dest ? `<div class="askmeta">${dest}<span>${parts.length ? `함께 보냄 · ${parts.join(" · ")}` : ""}</span></div>` : ""}
       <div class="askrow"><textarea data-ask rows="2" placeholder="${hint}" ${busy ? "disabled" : ""}>${esc(S.ask)}</textarea>
-        <button class="primary send" data-act="ask-send" ${busy || S.sending ? "disabled" : ""} title="${canRun() ? "보내기 (Enter)" : "모아서 복사 (Enter)"}">${canRun() ? "↑" : "복사"}</button></div>
+        <div class="askbtns"><button class="primary send" data-act="ask-send" ${busy || S.sending ? "disabled" : ""}
+          title="${canRun() ? "보내기 (Enter)" : "모아서 복사 (Enter)"}${n ? ` · 담은 ${n}개와 함께` : ""}">${canRun() ? "↑" : "복사"}${n ? `<sup>${n + 1}</sup>` : ""}</button>
+        <button class="mini queue" data-act="ask-queue" title="보낼 목록에 담고 다음 요청 쓰기 (Ctrl+Enter)">＋ 담기</button></div></div>
     </footer>`;
   }
   async function postJson(path, body) {
     return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
   }
-  // 이번 요청은 Claude 에게 넘어갔다. 화면에 얹어 둔 변경·댓글·캡처를 비운다 (안 비우면 다음 요청에 또 실린다)
+  // 이번 요청은 Claude 에게 넘어갔다(또는 목록에 담았다). 화면에 얹어 둔 변경·댓글·캡처를 비운다 (안 비우면 다음 요청에 또 실린다)
   function clearHandedOff() {
     [...cur().changes].reverse().filter(isDom).forEach(revertDom);
     S.variants = [newVariant("조합 A")];
@@ -700,43 +735,81 @@
     clearTimeout(draftTimer);
     try { localStorage.removeItem(DRAFT_KEY); } catch { /* 없어도 된다 */ }
   }
-  async function askSend() {
-    if (S.sending) return;
+  function saveQueue() {
+    // 시안 화면은 Claude 가 고칠 때마다 새로 뜬다. 목록은 브라우저에 두어 새로 떠도 남게 한다
+    try { localStorage.setItem(DRAFT_KEY + ":queue", JSON.stringify(S.queue)); } catch { /* 새로 뜨면 목록이 사라질 수 있다 */ }
+  }
+  // 지금 화면에 쓴 것(할 말 + 댓글·캡처·바뀐 것) 하나를 요청 하나로 만든다. 비었으면 null
+  function currentItem() {
     const box = root.querySelector("[data-ask]");
     const text = (box ? box.value : S.ask).trim();
     S.ask = text;
     if (S.editing) finishTextEdit(true);
-    const p = ctxProposal();
-    if (isBusy(p)) return toast("Claude 가 고치는 중이에요. 끝나면 이어서 말해 주세요");
-    const total = S.variants.reduce((n, v) => n + v.changes.length, 0);
-    if (!text && !S.comments.length && !total) return toast("할 말을 적거나 댓글·캡처를 남겨 주세요");
-    S.sending = true;
-    renderPanel();
-    if (!S.title) S.title = text.split("\n")[0].slice(0, 40) || "바로 말하기";
+    const total = S.variants.reduce((k, v) => k + v.changes.length, 0);
+    if (!text && !S.comments.length && !total) return null;
+    const title = S.title || text.split("\n")[0].slice(0, 40) || (S.comments[0] && S.comments[0].text.slice(0, 40)) || "바로 말하기";
+    S.title = title;
     const data = snapshot();
     data.ask = text;
-    const md = markdown(data);
+    const shots = S.comments.filter((c) => c.capture).length;
+    const meta = [S.comments.length - shots && `댓글 ${S.comments.length - shots}`, shots && `캡처 ${shots}`, total && `바뀐 것 ${total}`].filter(Boolean).join(" · ");
+    return { id: uid("q"), title, data, md: markdown(data), meta };
+  }
+  function askQueue() {
+    const item = currentItem();
+    if (!item) return toast("할 말을 적거나 댓글·캡처를 남긴 뒤 담아요");
+    S.queue.push(item);
+    saveQueue();
+    clearHandedOff();
+    render();
+    toast(`보낼 목록에 담았어요 (${S.queue.length}개)`);
+    root.querySelector("[data-ask]")?.focus();
+  }
+  async function askSend() {
+    if (S.sending) return;
+    const p = ctxProposal();
+    if (isBusy(p)) return toast("Claude 가 고치는 중이에요. 끝나면 이어서 말해 주세요");
+    const now = currentItem();
+    const items = [...S.queue, ...(now ? [now] : [])];
+    if (!items.length) return toast("할 말을 적거나 댓글·캡처를 남겨 주세요");
+    S.sending = true;
+    renderPanel();
+    const names = [];
     try {
-      const res = await postJson("/__studio/save", { data, markdown: md });
-      if (!res.ok) throw new Error(res.message || "저장하지 못했어요");
-      S.savedAs = res.name;
-      if (!canRun()) {
-        await copy(`${md}\n\n(저장본: ${INFO.requests || ".design-studio/requests"}/${res.name}.md)`);
+      for (const it of items) {
+        const res = await postJson("/__studio/save", { data: it.data, markdown: it.md });
+        if (!res.ok) throw new Error(res.message || "저장하지 못했어요");
+        names.push(res.name);
+      }
+      S.savedAs = names[names.length - 1];
+      const done = () => {
+        S.queue = [];
+        saveQueue();
         clearHandedOff();
+      };
+      if (!canRun()) {
+        // 다른 AI(채팅·다른 CLI)에 붙여 넣을 한 덩어리. 여러 개면 번호를 붙여 차례로 하게 한다
+        const dir = INFO.requests || ".design-studio/requests";
+        const body = items.length === 1 ? items[0].md
+          : `아래 요청 ${items.length}개를 차례로 해 주세요. 하나 끝날 때마다 무엇을 했는지 짧게 알려 주세요.\n\n`
+            + items.map((it, i) => `---\n\n## 요청 ${i + 1}\n\n${it.md.replace(/^# /m, "### ")}`).join("\n\n");
+        await copy(`${body}\n\n(저장본: ${names.map((x) => `${dir}/${x}.md`).join(", ")})`);
+        done();
         render();
-        return toast("모아서 복사했어요. Claude Code 에 붙여 넣으세요");
+        return toast(items.length > 1 ? `요청 ${items.length}개를 모아서 복사했어요` : "모아서 복사했어요. 쓰는 AI 에 붙여 넣으세요");
       }
       const revise = !!p && !["applied", "discarded"].includes(p.status);
       const started = await postJson(`/__studio/proposal/${revise ? "revise" : "start"}`,
-        revise ? { name: INFO.ctx, request: res.name } : { request: res.name, title: S.title });
+        revise ? { name: INFO.ctx, request: names[0], queue: names.slice(1) }
+          : { request: names[0], queue: names.slice(1), title: items[0].title });
       if (!started.ok) throw new Error(started.message || "Claude 에게 넘기지 못했어요");
-      clearHandedOff();
-      if (!revise) return setCtx(started.name, "Claude 가 고치는 대로 화면이 새로 보여요");
+      done();
+      if (!revise) return setCtx(started.name, items.length > 1 ? `요청 ${items.length}개를 차례로 고쳐요` : "Claude 가 고치는 대로 화면이 새로 보여요");
       await refreshProposals();
       render();
-      toast("Claude 가 이어서 고치기 시작했어요");
+      toast(items.length > 1 ? `요청 ${items.length}개를 차례로 고치기 시작했어요` : "Claude 가 이어서 고치기 시작했어요");
     } catch (err) {
-      toast(`${S.savedAs ? "저장은 했는데 " : ""}${err.message}`);
+      toast(`${names.length ? "저장은 했는데 " : ""}${err.message}`);
     } finally {
       S.sending = false;
       renderPanel();
@@ -927,9 +1000,55 @@
       </section>`;
   }
 
+  /* ----- 작업물 탭: 지금 파일, 폴더의 다른 파일, 첨부 ----- */
+  const KIND_ICON = { markdown: "¶", code: "{}", json: "{}", csv: "▦", xlsx: "▦", image: "▣", svg: "▣", pdf: "▤", docx: "▤", pptx: "▭", audio: "♪", video: "▶", html: "◇" };
+  function filesHtml() {
+    const head = `<div class="afile"><b>${esc(ART.file || INFO.app || "목록")}</b><span>${esc(ART.label)}</span>
+      ${ART.file && !ART.editable ? `<span class="tag">복사로 보내기</span>` : ""}</div>`;
+    const attach = ART.inbox ? `<button class="primary attach" data-act="attach">＋ 첨부</button>` : "";
+    const list = S.files.length
+      ? `<div class="aflist">${S.files.map((f) => `<button class="afrow ${f.file === ART.file ? "on" : ""}" data-open-file="${esc(f.file)}">
+          <i>${KIND_ICON[f.kind] || "·"}</i><span>${esc(f.file)}</span></button>`).join("")}</div>`
+      : "";
+    return head + attach + list;
+  }
+  function openFile(file) {
+    // 다른 파일로 가도 댓글·캡처는 이어진다 (임시본에 바로 남기고, '이어서 열었어요' 알림은 띄우지 않는다)
+    try {
+      if (S.dirty) localStorage.setItem(DRAFT_KEY, JSON.stringify(snapshot()));
+      sessionStorage.setItem("studio-restore", JSON.stringify({ tab: S.tab, mode: S.mode === "capture" ? "browse" : S.mode, live: true }));
+    } catch { /* 이어 하기만 안 된다 */ }
+    location.href = `/?frame=1${file ? `&file=${encodeURIComponent(file)}` : ""}`;
+  }
+  async function attachFiles(list) {
+    if (!ART || !ART.inbox) return toast("첨부는 받은 편지함(스튜디오를 파일 없이 연 것)에서 돼요");
+    let last = "";
+    for (const f of list) {
+      if (f.size > 15 * 1024 * 1024) {
+        toast(`${f.name}: 15MB 보다 커요`);
+        continue;
+      }
+      const data = await new Promise((ok, bad) => {
+        const r = new FileReader();
+        r.onload = () => ok(r.result);
+        r.onerror = bad;
+        r.readAsDataURL(f);
+      }).catch(() => "");
+      const res = data ? await postJson("/__studio/attach", { name: f.name, data }).catch(() => ({ ok: false })) : { ok: false };
+      if (res.ok) last = res.file;
+      else toast(`${f.name}: ${res.message || "첨부하지 못했어요"}`);
+    }
+    if (last) openFile(last);
+  }
   function elementHtml() {
     if (!S.sel || !S.sel.el.isConnected) {
       return `<div class="empty"><button class="primary" data-mode="select">⬚ 고르기</button></div>`;
+    }
+    if (DOC) {
+      const d = describe(S.sel.el);
+      return `<div class="afile"><b>${esc(d.refLabel || "고른 곳")}</b></div>
+        ${d.text ? `<p class="ctext">${esc(d.text)}</p>` : ""}
+        <div class="pacts2"><button data-doc-act="text">✎ 글자</button><button data-doc-act="comment">댓글</button><button data-doc-act="capture">▣ 캡처</button></div>`;
     }
     const el = S.sel.el;
     const cs = getComputedStyle(el);
@@ -1009,7 +1128,7 @@
     return S.comments.map((c) => `
       <div class="cmt ${c.done ? "done" : ""}">
         <div class="chead"><span class="num">${c.n}</span><span class="kind k-${c.kind}">${esc(kindLabel(c.kind))}</span>
-          <span class="where">${esc(viewLabel(c.anchor.view))} · ${esc(c.anchor.label)}${c.capture ? " · 캡처" : c.region ? " · 영역" : ""}</span></div>
+          <span class="where">${esc(viewLabel(c.anchor.view))} · ${esc(DOC ? c.anchor.refLabel || "파일 전체" : c.anchor.label)}${c.capture ? " · 캡처" : c.region ? " · 영역" : ""}</span></div>
         ${c.shot ? `<button class="shotbtn" data-shot-view="${c.id}" title="크게 보기"><img class="shotimg" src="${shotUrl(c.shot)}" alt="${c.n}번 캡처"></button>` : ""}
         <div class="ctext">${esc(c.text)}</div>
         <div class="cacts"><button data-cmt-go="${c.id}">보기</button><button data-cmt-edit="${c.id}">고치기</button><button data-cmt-del="${c.id}">지우기</button></div>
@@ -1206,7 +1325,7 @@
     if (!t) return;
     if (S.mode === "select") {
       // 고른 요소를 누른 채 끌면 그 자리에서 자유롭게 옮긴다 (CSS translate → 저장본에서는 '이만큼 옮기고 싶다')
-      if (e.type === "pointerdown" && S.sel && S.sel.el.contains(t)) {
+      if (e.type === "pointerdown" && S.sel && S.sel.el.contains(t) && !DOC) {
         const [bx, by] = parseTranslate(S.sel.el);
         S.drag = { x: e.clientX, y: e.clientY, bx, by, moved: false, key: uid("k"), label: "" };
       }
@@ -1326,6 +1445,14 @@
   function ctxItems(el) {
     const out = [];
     const add = (id, label, key = "") => out.push({ id, label, key });
+    if (DOC) {
+      add("select", "고르기", "S");
+      add("comment", "댓글 달기", "C");
+      add("capture", "캡처해서 메모", "X");
+      if (isTextish(el)) add("text", "글자 고치기", "⏎");
+      add("copyref", "위치 복사");
+      return out;
+    }
     const sep = () => out.length && out[out.length - 1] !== "-" && out.push("-");
     add("select", "고르기", "S");
     const p = el.parentElement;
@@ -1424,6 +1551,10 @@
       return askAI(true);
     }
     if (id === "copysel") return copy(cssPath(el)).then(() => toast("선택자를 복사했어요"));
+    if (id === "copyref") {
+      const d = describe(el);
+      return copy(`${d.view} · ${d.refLabel || "파일 전체"}`).then(() => toast("위치를 복사했어요"));
+    }
   }
 
   /* ----- 글자 고치기 ----- */
@@ -2217,7 +2348,7 @@
   function renderAi(pop = false) {
     const box = $(".ai");
     if (!box) return;
-    box.hidden = S.clean || !INFO.claude;
+    box.hidden = S.clean || !INFO.claude || DOC;
     if (box.hidden) return;
     const o = toTop(0, 0);
     box.style.left = `${o.x + 14}px`;
@@ -2276,9 +2407,13 @@
   function markdown(data) {
     const L = [];
     const v = data.variants[data.chosen];
-    L.push(`# 디자인 요청: ${data.title || "(제목 없음)"}`, "");
+    L.push(`# ${ART ? "작업물 수정 요청" : "디자인 요청"}: ${data.title || "(제목 없음)"}`, "");
+    if (ART) {
+      L.push(`- 작업물: \`${ART.root}${ART.file ? "/" + ART.file : ""}\` (${ART.label})`);
+      if (!ART.editable && ART.file) L.push("- 이 형식은 글자 파일이 아니다. 원본을 만든 도구·스크립트·소스가 있으면 그것을 고치고, 없으면 바꿀 내용을 정확히 적어 준다.");
+    }
     L.push(`- 저장: ${new Date().toLocaleString("ko-KR")} · 앱 v${data.app.version} · ${data.app.data === "real" ? "내 데이터" : "연습용 데이터"}`);
-    L.push(`- 창 크기 ${data.viewport.w}×${data.viewport.h} · 테마 ${themeLabel(data.theme)} · 마지막 화면 ${viewLabel(data.view)}`);
+    if (!DOC) L.push(`- 창 크기 ${data.viewport.w}×${data.viewport.h} · 테마 ${themeLabel(data.theme)} · 마지막 화면 ${viewLabel(data.view)}`);
     L.push(`- 고른 조합: **${v.name}** (조합 ${data.variants.length}개)`);
     L.push(`- 재량: ${data.freedom === "exact" ? "적은 그대로만 옮겨 주세요" : "뜻을 살려 더 다듬어도 좋아요 (어울리게 조정·주변 정리 허용)"}`);
     L.push(`- 원본 데이터: \`${INFO.requests || ".design-studio/requests"}/<이 파일 이름>.json\``, "");
@@ -2288,7 +2423,17 @@
       L.push(`## 댓글·캡처 ${data.comments.length}개`, "");
       for (const c of data.comments) {
         L.push(`${c.n}. **[${kindLabel(c.kind)}]** ${c.text}${c.done ? " _(해결됨)_" : ""}`);
-        L.push(`   - 화면: ${viewLabel(c.anchor.view)} · 요소 \`${c.anchor.label}\`${c.anchor.text ? ` “${c.anchor.text.slice(0, 50)}”` : ""} · ${c.anchor.size}`);
+        if (DOC) {
+          L.push(`   - 위치: ${c.anchor.view} · ${c.anchor.refLabel || "파일 전체"}${c.anchor.text ? ` “${c.anchor.text.slice(0, 60)}”` : ""}`);
+          const nat = c.anchor.natural;
+          if (c.region && nat) {
+            const px = (f, size) => Math.round(f * size);
+            L.push(`   - 그림 안 영역: x ${px(c.region.x, nat.w)}~${px(c.region.x + c.region.w, nat.w)}px, y ${px(c.region.y, nat.h)}~${px(c.region.y + c.region.h, nat.h)}px (원본 ${nat.w}×${nat.h})`);
+          }
+          if (c.shot) L.push(`   - 캡처 그림: \`${INFO.captures || ".design-studio/captures"}/${c.shot.id}.png\` (사용자가 가리킨 그 화면 — Read 로 열어 본다)`);
+          continue;
+        }
+        L.push(`   - 화면: ${viewLabel(c.anchor.view)} · 요소 \`${c.anchor.label}\`${c.anchor.text ? ` “${c.anchor.text.slice(0, 50)}”` : ""} · ${c.anchor.size}${c.anchor.refLabel ? ` · 위치 ${c.anchor.refLabel}` : ""}`);
         L.push(`   - 선택자: \`${c.anchor.path}\` (같은 모양: \`${c.anchor.selector}\`)`);
         if (c.region) L.push(`   - 영역: 그 요소 안 약 ${c.regionPx.w}×${c.regionPx.h}px. 안에 든 것: ${c.inside.map((i) => `\`${i.label}\`${i.text ? ` “${i.text}”` : ""}`).join(", ") || "-"}`);
         if (c.shot) L.push(`   - 캡처 그림: \`${INFO.captures || ".design-studio/captures"}/${c.shot.id}.png\` (사용자가 가리킨 그 화면 — Read 로 열어 본다)`);
@@ -2338,7 +2483,9 @@
       const texts = ch.filter((c) => c.type === "text");
       if (texts.length) {
         L.push("### 글자", "");
-        texts.forEach((c) => L.push(`- ${viewLabel(c.target.view)} \`${c.target.path}\`: “${c.from.trim()}” → “${c.to.trim()}”`));
+        texts.forEach((c) => L.push(DOC
+          ? `- ${c.target.view} · ${c.target.refLabel || "위치 모름"}: “${c.from.trim()}” → “${c.to.trim()}”`
+          : `- ${viewLabel(c.target.view)} \`${c.target.path}\`: “${c.from.trim()}” → “${c.to.trim()}”`));
         L.push("");
       }
       const moves = ch.filter((c) => c.type === "move");
@@ -2347,7 +2494,7 @@
         moves.forEach((c) => L.push(`- ${viewLabel(c.target.view)} \`${c.parent.label}\` 안에서 \`${c.target.label}\`${c.target.text ? ` “${c.target.text.slice(0, 30)}”` : ""} 을(를) \`${c.ref.label}\`${c.ref.text ? ` “${c.ref.text.slice(0, 30)}”` : ""} ${c.where === "before" ? "앞" : "뒤"}으로 (${c.fromIndex + 1}번째 → ${(c.toIndex ?? 0) + 1}번째)`));
         L.push("");
       }
-      if (variant.css) L.push("### 화면에서 쓴 CSS (덮어쓰기 규칙 — 그대로 붙이지 말고 원래 규칙을 고치는 데 참고)", "", "```css", variant.css, "```", "");
+      if (variant.css && !DOC) L.push("### 화면에서 쓴 CSS (덮어쓰기 규칙 — 그대로 붙이지 말고 원래 규칙을 고치는 데 참고)", "", "```css", variant.css, "```", "");
     };
     section(v, true);
     data.variants.forEach((x, i) => i !== data.chosen && x.changes.length && section(x, false));
@@ -2518,6 +2665,33 @@
     const d = b.dataset;
     if (d.mode) return setMode(d.mode);
     if (d.act === "ask-send") return askSend();
+    if (d.act === "ask-queue") return askQueue();
+    if (d.dest) {
+      S.dest = d.dest;
+      savePref("dest", d.dest);
+      return renderPanel();
+    }
+    if (d.qDel) {
+      S.queue = S.queue.filter((q) => q.id !== d.qDel);
+      saveQueue();
+      return renderPanel();
+    }
+    if (d.openFile !== undefined) return openFile(d.openFile);
+    if (d.act === "attach") {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.multiple = true;
+      input.onchange = () => attachFiles([...input.files]);
+      input.click();
+      return;
+    }
+    if (d.docAct && S.sel) {
+      const el = S.sel.el;
+      const r = el.getBoundingClientRect();
+      if (d.docAct === "text") return startTextEdit(el);
+      if (d.docAct === "comment") return startPointComment(el, r.left + Math.min(20, r.width / 2), r.top + Math.min(10, r.height / 2));
+      if (d.docAct === "capture") return startCapture({ x: r.left, y: r.top }, { clientX: r.right, clientY: r.bottom });
+    }
     if (d.shotView) {
       const c = S.comments.find((x) => x.id === d.shotView);
       if (!c || !c.shot) return;
@@ -2584,6 +2758,7 @@
     }
     if (d.cmtGo) {
       const c = S.comments.find((x) => x.id === d.cmtGo);
+      if (ART && c.anchor.view !== viewKey()) return openFile(c.anchor.view === "목록" ? "" : c.anchor.view);
       if (c.anchor.view !== viewKey() && APP.switchView) APP.switchView(c.anchor.view);
       setTimeout(() => {
         const el = resolve(c.anchor, c._el);
@@ -2831,7 +3006,7 @@
     }
     if (fromStudio(e) && t && t.matches && t.matches("[data-ask]") && e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
-      return askSend();
+      return e.ctrlKey || e.metaKey ? askQueue() : askSend();
     }
     if (fromStudio(e) && t && t.matches && t.matches("textarea") && e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -2926,6 +3101,27 @@
     }
   } catch { /* 안내만 못 보인다 */ }
   if (INFO.ctx) S.tab = "proposals";
+  else if (DOC) S.tab = "files";
+  try { S.queue = JSON.parse(localStorage.getItem(DRAFT_KEY + ":queue") || "[]"); } catch { S.queue = []; }
+  if (ART && !ART.single) {
+    fetch("/__studio/files").then((r) => r.json()).then((res) => {
+      S.files = res.items || [];
+      if (S.tab === "files") renderPanel();
+    }).catch(() => {});
+  }
+  if (ART && ART.inbox) {
+    // 받은 편지함: 앱 화면이나 패널 어디에 끌어 놓아도 첨부
+    const over = (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) e.preventDefault(); };
+    const drop = (e) => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      attachFiles([...e.dataTransfer.files]);
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
+    root.addEventListener("dragover", over);
+    root.addEventListener("drop", drop);
+  }
   render();
   (async () => {
     // 앱이 첫 화면을 다 그린 뒤에 불러와야 글자·순서 변경이 제자리를 찾는다
@@ -3237,6 +3433,31 @@
       .shotbtn { display: block; padding: 0 !important; border: 0 !important; background: none !important; }
       .shotbig { display: block; max-width: 100%; max-height: 62vh; margin: 8px auto; border: 1px solid var(--s-line); border-radius: 8px; background: #fff; }
       .empty.two { display: flex; gap: 8px; }
+      /* 작업물 탭 */
+      .afile { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 10px 0 8px; }
+      .afile b { font: 600 14px/1.3 var(--s-head); word-break: break-all; }
+      .afile span { color: var(--s-soft); font-size: 11.5px; }
+      .tag { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--s-bg3); color: var(--s-soft); font-size: 11px; }
+      .attach { width: 100%; margin: 4px 0 10px; padding: 9px !important; }
+      .aflist { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+      .afrow { display: flex !important; gap: 8px; align-items: center; text-align: left; border-color: transparent !important; background: none !important; padding: 6px 6px !important; }
+      .afrow:hover { background: var(--s-bg2) !important; }
+      .afrow.on { background: var(--s-bg3) !important; }
+      .afrow i { width: 18px; text-align: center; font-style: normal; color: var(--s-soft); }
+      .afrow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* 보낼 목록·보낼 곳 */
+      .aq { display: flex; flex-direction: column; gap: 3px; margin-bottom: 7px; max-height: 140px; overflow: auto; }
+      .aqi { display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 7px; background: var(--s-bg2); font-size: 11.5px; }
+      .aqi b { flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--s-acc); color: var(--s-on-acc); font-size: 10px; display: grid; place-items: center; }
+      .aqi span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .aqi small { color: var(--s-soft); flex: none; }
+      .askmeta { display: flex; align-items: center; gap: 8px; }
+      .seg.dest { display: inline-flex; margin: 0; }
+      .seg.dest button { padding: 2px 8px !important; font-size: 11px; }
+      .askbtns { display: flex; flex-direction: column; gap: 4px; }
+      .askbtns .queue { padding: 2px 6px !important; font-size: 11px; white-space: nowrap; }
+      .send sup { font-size: 9px; margin-left: 1px; }
+      .ov.doc .grip, .ov.doc .resize, .ov.doc .scopechip { display: none !important; }
       .act { font: 11px/1.5 ui-monospace, Consolas, monospace; color: var(--s-soft); background: var(--s-well); border-radius: 6px; padding: 6px 8px; max-height: 160px; overflow: auto; }
       .act div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .res { white-space: pre-wrap; background: var(--s-well); border-radius: 6px; padding: 8px; margin: 6px 0; max-height: 220px; overflow: auto; }

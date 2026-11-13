@@ -87,6 +87,11 @@ class AppConfig:
     denies: list[str] = field(default_factory=list)
     modes: list[str] = field(default_factory=list)
     proposals: bool = True  # 시안(복사본 고치기). 번들러 앱처럼 URL 과 파일이 1:1 이 아니면 false
+    # 작업물 모드 (studio/artifacts.py): 앱 서버 없이 파일·폴더를 보기 화면으로 띄운다
+    artifact: bool = False
+    inbox: bool = False  # 받은 편지함 (끌어 놓아 첨부)
+    entry: str = ""  # 처음 열 파일 (web_root 기준). 비면 폴더 목록
+    files: list[str] | None = None  # 시안에 복사할 파일 (None = 폴더의 글자 파일 전부)
 
     @property
     def requests_dir(self) -> Path:
@@ -140,6 +145,9 @@ def _fill(text: str, values: dict[str, str]) -> str:
 def load(config_path: str | Path, project: str | Path | None, mode: str | None) -> AppConfig:
     path = Path(config_path).resolve()
     data = json.loads(path.read_text(encoding="utf-8"))
+    if "artifact" in data:  # 작업물 모드가 남긴 설정 (snapshot·doctor 가 다시 읽을 때)
+        from .artifacts import make_config
+        return make_config(None if data.get("inbox") else data["artifact"])
     base = path.parent
     proj = Path(project).resolve() if project else Path(_fill(str(data.get("project") or "."), {})).expanduser()
     if not proj.is_absolute():

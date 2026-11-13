@@ -1,9 +1,11 @@
 # 디자인 스튜디오 for Claude Code
 
-지금 Claude Code로 만들고 있는 웹 앱 위에 **연습용 복제 앱 편집 도구**를 얹습니다. 화면을 직접 만지고 댓글을 달아 저장하면 Claude가 실제 코드로 옮기고 다듬습니다.
+지금 Claude Code로 만들고 있는 웹 앱, 또는 **AI가 만든 어떤 작업물이든**(글·코드·표·그림·PDF·Word·PowerPoint·Excel·소리·영상) 위에 편집 도구를 얹습니다. 직접 만지고 댓글·캡처를 달아 보내면 Claude가 원본 위치를 찾아 고치고 바로 보여 줍니다.
 
 - **오른쪽 단추 메뉴**: 요소마다 고르기·댓글·캡처·글자·색·크기·숨기기·되돌리기를 한 번에 합니다.
 - **캡처**: 화면을 끌어 그림으로 찍고 메모를 답니다. 댓글과 함께 모였다가 한 번에 Claude에게 갑니다.
+- **작업물 모드**: `run_studio.py open <파일·폴더>` 만 하면 형식을 알아보고 댓글 달 수 있는 화면으로 띄웁니다(개인화 필요 없음). 파일 없이 열면 끌어 놓아 첨부합니다. 댓글마다 원본 위치(몇째 줄·문단·슬라이드·칸·쪽·초)가 붙습니다.
+- **보낼 목록**: 요청을 **＋ 담기**로 여러 개 모아 한 번에 보냅니다. Claude는 같은 대화에서 하나씩 차례로 고칩니다. 보낼 곳은 **Claude**(바로 고침) 또는 **복사**(다른 AI에 붙여 넣기).
 - **바로 말하기**: 패널 아래 칸에 할 말을 적고 Enter. 댓글·캡처·바꾼 것이 함께 Claude CLI로 가고, Claude가 고치는 대로 화면이 새로 보입니다. 이어 말하면 같은 대화로 더 고칩니다.
 - **만지기**: 색(그라데이션 판·스포이트), 테마, 글자 크기·굵기, 간격, 모서리, 위치(끌어 옮기기), 크기, 순서, 글자
 - **단추 동작**: 누를 때 일어날 단계를 짜고 시연합니다. 지금 동작은 AI가 코드에서 찾아 줍니다.
@@ -49,6 +51,8 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\design-studio
 python <도구>/run_studio.py init   --project <앱>   # 앱 분석 → 개인화 초안 + analysis.md
 python <도구>/run_studio.py doctor --project <앱>   # 개인화 점검 (띄우기·도구·토큰·테마·화면 이동·쓰기 막기·콘솔 오류)
 python <도구>/run_studio.py        --project <앱>   # 스튜디오 열기 (--mode real: 내 데이터, 쓰기 막음)
+python <도구>/run_studio.py open <파일·폴더>        # 작업물 열기 (형식 자동 인식, 개인화 필요 없음)
+python <도구>/run_studio.py open                    # 받은 편지함 (끌어 놓아 첨부)
 python <도구>/run_studio.py snapshot <저장본>       # (앱 폴더에서) 지금 / 요청한 모습 사진
 ```
 
@@ -85,7 +89,7 @@ python <도구>/run_studio.py snapshot <저장본>       # (앱 폴더에서) �
 ## 시험
 
 ```bash
-python tests/run.py   # 예제 앱(examples/hello)으로 36개 항목 (캡처·바로 말하기는 가짜 claude 로)
+python tests/run.py   # 50개 항목: 예제 앱(examples/hello), 작업물 형식별(tests/fixtures.py), 캡처·보낼 목록은 가짜 claude 로
 ```
 
 ## 폴더
@@ -95,6 +99,6 @@ python tests/run.py   # 예제 앱(examples/hello)으로 36개 항목 (캡처·�
 | `skill/tutleblue-design-studio/SKILL.md` | 시작 스킬 (세션에 넣거나 `~/.claude/skills`에 설치) |
 | `skill/GUIDE.md` | Claude용 안내서: 개인화·열기·저장본 반영·시안 모드·업데이트 |
 | `run_studio.py` | 어디서든 부르는 입구 |
-| `studio/` | `server.py`(셸·프록시·API), `config.py`, `init.py`(앱 분석), `doctor.py`(점검), `proposals.py`(시안), `ai.py`, `snapshot.py`, `assets/`(편집 도구·글꼴 OFL) |
+| `studio/` | `server.py`(셸·프록시·API), `config.py`, `artifacts.py`(작업물 형식 알아보기·보기 화면), `init.py`(앱 분석), `doctor.py`(점검), `proposals.py`(시안·보낼 목록), `ai.py`, `snapshot.py`, `assets/`(편집 도구·글꼴 OFL) |
 | `templates/` | 런처 틀 |
 | `examples/hello/` | 시험용 예제 앱 |

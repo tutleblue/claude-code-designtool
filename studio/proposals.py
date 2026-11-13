@@ -31,7 +31,10 @@ from pathlib import Path
 from .claude_cli import find_claude, kill_tree, spawn
 from .config import STUDIO_HOME, AppConfig, fill_check
 
-TEXT_EXT = {".html", ".js", ".css", ".json", ".svg", ".txt", ".md"}
+from .artifacts import CODE_EXT
+
+# 시안에 복사하는 글자 파일 (그림 등은 복사하지 않고 원본을 보여 준다). 작업물 모드의 글·코드·표도 여기 든다
+TEXT_EXT = {".html", ".htm", ".js", ".css", ".json", ".svg", ".txt", ".md", ".markdown", ".csv", ".tsv"} | CODE_EXT
 ACTIVE = {"running", "queued"}
 
 
@@ -131,6 +134,7 @@ class ProposalManager:
     def _public(self, meta: dict) -> dict:
         keep = ("name", "title", "status", "createdAt", "updatedAt", "error", "rounds", "applyReport", "cost")
         pub = {k: meta.get(k) for k in keep}
+        pub["queue"] = len(meta.get("queue") or [])
         pub["activity"] = (meta.get("activity") or [])[-12:]
         pub["changed"] = self.changed_files(meta["name"]) if meta.get("status") not in ACTIVE else []
         # 시안 화면 파일이 마지막으로 바뀐 때. 화면이 이것을 보고 Claude 가 고치는 대로 앱을 새로 띄운다 (끝난 시안은 안 센다)
@@ -179,7 +183,7 @@ class ProposalManager:
         return "\n".join(chunks)
 
     # ---------- 만들기·고치기 ----------
-    def create(self, request_stem: str, title: str = "") -> dict:
+    def create(self, request_stem: str, title: str = "", queue: list[str] | None = None) -> dict:
         # 폴더 이름은 저장 시각(영문·숫자)만 쓴다. 이 이름이 claude 권한 인자에 들어가는데,
         # Windows 에서 claude.cmd 는 cmd.exe 를 거쳐 한글 인자가 코드페이지 때문에 깨질 수 있다.
         m = re.match(r"\d{8}-\d{6}", Path(request_stem).name)
@@ -190,19 +194,24 @@ class ProposalManager:
         d = self.dir(name)
         (d / "web").mkdir(parents=True)
         (d / "base").mkdir()
-        for rel in _text_files(self.web_root):
+        files = _text_files(self.web_root)
+        if self.cfg.files is not None:  # 작업물 하나만 연 경우: 그 파일만 (다운로드 폴더를 통째로 복사하지 않게)
+            files = [f for f in files if f in self.cfg.files]
+        for rel in files[:3000]:
             for target in (d / "web" / rel, d / "base" / rel):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(self.web_root / rel, target)
         meta = {
             "name": name, "title": title or request_stem, "request": request_stem, "status": "queued", "createdAt": now_iso(), "updatedAt": now_iso(),
             "sessionId": str(uuid.uuid4()), "rounds": [], "activity": [], "cost": 0.0,
+            # 보낼 목록: 이 회차가 끝나면 같은 대화(--resume)로 차례로 이어 보낼 요청들
+            "queue": list(queue or []),
         }
         self.save(meta)
         self.run(name, request_stem, followup=False)
         return meta
 
-    def revise(self, name: str, request_stem: str) -> dict:
+    def revise(self, name: str, request_stem: str, queue: list[str] | None = None) -> dict:
         # 확인과 '대기' 표시를 한 번에 한다. 두 번 누르면 같은 세션에 --resume 이 둘 붙을 수 있었다.
         with self.lock:
             meta = self.load(name)
@@ -216,6 +225,7 @@ class ProposalManager:
             if proc and proc.poll() is None:
                 raise ValueError("멈추는 중이에요. 잠시 뒤 다시 눌러 주세요.")
             meta["status"] = "queued"
+            meta["queue"] = list(queue or [])
             self.save(meta)
         # 지난 회차가 세션을 못 만들고 끝났으면(실행 실패·곧바로 멈춤) 이어 할 대화가 없다. 새 대화로 시작한다.
         self.run(name, request_stem, followup=bool(meta.get("rounds")) and bool(meta.get("sessionStarted")))
@@ -244,6 +254,9 @@ class ProposalManager:
                 f"사용자가 시안을 보고 더 고쳐 달라고 했다. 새 요청: `{req}.md` (정확한 값은 `{req}.json`).\n"
                 "이 요청은 시안 화면 위에서 만든 것이라 선택자·규칙·글자는 시안 기준이다. 전 회차 요청과 너의 설명은 이 대화에 있다.\n"
             )
+        elif cfg.artifact:
+            head = (f"작업물 수정 요청 `{req}.md` (정확한 값은 `{req}.json`) 을 '{cfg.name}' 의 '시안' 으로 만든다.\n"
+                    f"원본은 `{cfg.web_root.as_posix()}` 에 있고, 그 글자 파일을 시안 폴더에 복사해 두었다.\n")
         else:
             head = f"디자인 요청 `{req}.md` (정확한 값은 `{req}.json`) 을 '{cfg.name}' 앱의 '시안' 으로 만든다.\n"
         context = (f"\n이 앱의 규칙: `{cfg.rel(cfg.context_path)}` 를 먼저 읽고 따른다.\n" if cfg.context_path else "")
@@ -280,6 +293,8 @@ class ProposalManager:
         # 진짜 화면 폴더는 어떤 경우에도 못 고치게 (deny 가 allow 보다 먼저). '/x/**' 는 작업 폴더(프로젝트) 기준이다.
         # './web/**' 처럼 쓰면 깊이와 상관없이 모든 web/ 에 맞아 시안 폴더(…/proposals/<이름>/web/)까지 막혔다(실측).
         web_rel = self.cfg.rel(self.web_root)
+        if re.match(r"^[A-Za-z]:/", web_rel):  # 작업물 모드: 원본이 작업 폴더 밖 (Windows) → //c/... 꼴의 절대 경로
+            web_rel = "/" + web_rel[0].lower() + web_rel[2:]
         denied = [f"{tool}(/{web_rel}/**)" for tool in ("Edit", "Write", "MultiEdit")]
         cmd = ["-p", "--output-format", "stream-json", "--verbose",
                "--permission-mode", "dontAsk", "--max-turns", os.environ.get("STUDIO_MAX_TURNS", "80")]
@@ -336,6 +351,7 @@ class ProposalManager:
                         pass
 
     def _pump_inner(self, name: str, proc: subprocess.Popen, round_idx: int) -> None:
+        next_request = ""
         result: dict = {}
         tail: list[str] = []
         for raw in proc.stdout:
@@ -387,6 +403,10 @@ class ProposalManager:
                 rnd["status"] = "ready"
                 rnd["result"] = str(result.get("result") or "").strip()
                 meta["status"] = "ready"
+                if meta.get("queue"):
+                    # 보낼 목록의 다음 요청: 화면이 '다 됨' 으로 깜빡이지 않게 바로 '대기' 로 두고, 잠금 밖에서 띄운다
+                    next_request = meta["queue"].pop(0)
+                    meta["status"] = "queued"
             else:
                 rnd["status"] = "failed"
                 reason = result.get("subtype") or f"끝남 코드 {proc.returncode}"
@@ -395,8 +415,13 @@ class ProposalManager:
                 rnd["result"] = str(result.get("result") or "").strip()
                 meta["status"] = "failed"
                 meta["error"] = f"Claude 작업이 실패했어요 ({reason}). " + (" / ".join(tail[-2:]) if tail and not result else "")
+                if meta.get("queue"):
+                    meta["error"] += f" 목록에 남은 요청 {len(meta['queue'])}개는 보내지 않았어요(저장본은 남아 있어요)."
+                    meta["queue"] = []
             meta["updatedAt"] = now_iso()
             self.save(meta)
+        if next_request:
+            self.run(name, next_request, followup=bool(meta.get("sessionStarted")))
 
     @staticmethod
     def _describe(ev: dict) -> list[str]:
@@ -433,6 +458,7 @@ class ProposalManager:
             meta = self.load(name)
             if meta and meta.get("status") in ACTIVE:
                 meta["status"] = "cancelled"
+                meta["queue"] = []  # 멈추면 목록에 남은 요청도 보내지 않는다 (저장본은 남는다)
                 meta["error"] = "멈췄어요. '더 고쳐 줘' 로 이어서 시킬 수 있어요."
                 self.save(meta)
         if proc and proc.poll() is None:

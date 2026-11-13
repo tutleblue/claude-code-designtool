@@ -25,11 +25,11 @@ def emit(ev):
 
 
 emit({"type": "system", "subtype": "init"})
-target = Path(web) / "styles.css"
+target = Path(web) / os.environ.get("FAKE_CLAUDE_FILE", "styles.css")
 emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": str(target)}}]}})
 time.sleep(float(os.environ.get("FAKE_CLAUDE_DELAY", "1")))
 color = "rgb(4, 5, 6)" if resume else "rgb(1, 2, 3)"
 with target.open("a", encoding="utf-8") as fh:
-    fh.write(f"\n.title {{ color: {color}; }}\n")
+    fh.write(f"\n.title {{ color: {color}; }}\n" if target.suffix == ".css" else f"\n고친 줄 {color}\n")
 time.sleep(float(os.environ.get("FAKE_CLAUDE_DELAY", "1")))
 emit({"type": "result", "subtype": "success", "is_error": False, "result": f"제목 색을 {color} 로 바꿨어요.", "total_cost_usd": 0})

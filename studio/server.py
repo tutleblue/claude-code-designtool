@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
 
+from . import artifacts
 from . import config as appconfig
 from .ai import AIRunner
 from .claude_cli import kill_tree
@@ -83,6 +84,8 @@ SHELL_HTML = """<!doctype html>
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="studio open", description="디자인 스튜디오 띄우기")
+    ap.add_argument("target", nargs="?", default="",
+                    help="작업물 파일·폴더 (AI 가 만든 글·코드·표·그림·PDF·문서 등). 비우면 앱 설정을, 그것도 없으면 받은 편지함을 연다")
     ap.add_argument("--project", default="", help="앱 저장소 폴더 (기본: 지금 폴더). 그 안의 .claude/design-studio/studio.app.json 을 쓴다")
     ap.add_argument("--app", default="", help="앱 설정 파일을 따로 줄 때")
     ap.add_argument("--mode", default="", help="설정의 modes 중 하나 (기본: 첫 번째)")
@@ -120,6 +123,8 @@ def wait_http(url: str, proc: subprocess.Popen | None, seconds: float = 60) -> b
 
 
 def start_app(cfg: appconfig.AppConfig) -> tuple[str, subprocess.Popen | None, Path | None]:
+    if cfg.artifact:  # 작업물 모드는 띄울 앱이 없다. 보기 화면은 스튜디오가 직접 만든다
+        return "", None, None
     if not cfg.launch:
         upstream = appconfig.fill_upstream(cfg, 0)
         if not wait_http(upstream, None, 10):
@@ -149,7 +154,7 @@ class Studio:
     def __init__(self, args: argparse.Namespace, cfg: appconfig.AppConfig, upstream: str):
         self.args = args
         self.cfg = cfg
-        self.upstream = urlparse(upstream)
+        self.upstream = urlparse(upstream) if upstream else None
         self.override = Path(args.web).resolve() if args.web else None
         self.proposals = ProposalManager(cfg, manage=not args.snapshot)
         self.claude_ok = bool(self.proposals.claude_path())
@@ -244,20 +249,52 @@ def build_handler(st: Studio):
             self._dispatch()
 
         def _local_file(self, route: str) -> Path | None:
-            """시안 폴더에 있는 글자 파일은 그것을 준다 (그림 등은 시안에 없으니 앱이 준다)."""
-            base = self._web_override()
-            if not base:
-                return None
+            """시안 폴더에 있는 글자 파일은 그것을 준다 (그림 등은 시안에 없으니 앱이 준다).
+            작업물 모드는 앱이 없으니 시안에 없으면 원본 폴더에서 준다."""
+            bases = [self._web_override()]
+            if cfg.artifact:
+                bases.append(cfg.web_root)
             rel = unquote(route).lstrip("/")
-            cand = (base / rel).resolve()
-            if cand == base or base not in cand.parents or not cand.is_file():
-                return None
-            return cand
+            for base in bases:
+                if not base:
+                    continue
+                cand = (base / rel).resolve()
+                if cand != base and base in cand.parents and cand.is_file():
+                    return cand
+            return None
+
+        def _artifact_rel(self, params: dict) -> str:
+            """보기 화면에 띄울 파일 (원본 폴더 기준). 폴더 밖·숨김 경로는 받지 않는다."""
+            rel = (params.get("file", [""])[0] or cfg.entry).replace("\\", "/").strip("/")
+            if not rel:
+                return ""
+            parts = rel.split("/")
+            if any(p in ("", ".", "..") or p.startswith(".") for p in parts):
+                return cfg.entry
+            if cfg.files is not None and rel not in cfg.files:  # 파일 하나만 연 경우: 옆 파일은 안 보여 준다
+                return cfg.entry
+            cand = (cfg.web_root / rel).resolve()
+            return rel if cfg.web_root in cand.parents and cand.is_file() else cfg.entry
 
         def _frame(self, parsed) -> None:
             base = self._web_override()
             html = None
-            if base and (base / "index.html").is_file():
+            art = None
+            if cfg.artifact:
+                params = parse_qs(parsed.query)
+                rel = self._artifact_rel(params)
+                kind = artifacts.kind_of(cfg.web_root / rel) if rel else "folder"
+                src = (base or cfg.web_root) / rel if rel else None
+                if kind == "html":
+                    if not (src and src.is_file()):
+                        src = cfg.web_root / rel
+                    html = src.read_text(encoding="utf-8", errors="replace")
+                else:
+                    html = artifacts.view(cfg, base or cfg.web_root, rel, params.get("mode", [""])[0])
+                art = {"kind": kind, "label": artifacts.KIND_LABEL.get(kind, kind), "file": rel, "inbox": cfg.inbox,
+                       "single": cfg.files is not None, "editable": kind in artifacts.EDITABLE,
+                       "root": str(cfg.web_root)}
+            elif base and (base / "index.html").is_file():
                 html = (base / "index.html").read_text(encoding="utf-8")
             else:
                 status, headers, body = self._upstream("GET", parsed.path + (f"?{parsed.query}" if parsed.query else ""),
@@ -267,7 +304,7 @@ def build_handler(st: Studio):
                 html = body.decode("utf-8", errors="replace")
             info = {"mode": cfg.mode, "modes": cfg.modes, "app": cfg.name, "version": VERSION, "requests": cfg.rel(cfg.requests_dir),
                     "ctx": "" if st.override else self._context(), "claude": st.claude_ok, "proposals": cfg.proposals, "snapshot": st.args.snapshot,
-                    "captures": cfg.rel(captures_dir(cfg))}
+                    "captures": cfg.rel(captures_dir(cfg)), "artifact": art}
             head = ('<link rel="stylesheet" href="/__studio/studio-fonts.css" />\n'
                     '<link rel="stylesheet" href="/__studio/studio.css" />\n')
             # 앱 스크립트가 다 돈 뒤 붙도록 body 끝에, defer 로 (defer 끼리는 문서 순서대로 돈다)
@@ -289,6 +326,19 @@ def build_handler(st: Studio):
                     return self._send(font.read_bytes(), "font/woff2", extra={"Cache-Control": "max-age=86400"})
             if name == "proposals":
                 return self.send_json({"ok": True, "items": st.proposals.list(), "claude": st.claude_ok})
+            if name == "files" and cfg.artifact:
+                return self.send_json({"ok": True, "items": [] if cfg.files is not None else artifacts.list_files(cfg.web_root),
+                                       "root": str(cfg.web_root)})
+            if name == "page" and cfg.artifact:
+                rel = self._artifact_rel(params)
+                pages = artifacts.page_images(cfg, cfg.web_root / rel) if rel else []
+                try:
+                    n = int(params.get("n", ["0"])[0])
+                except ValueError:
+                    n = 0
+                if 1 <= n <= len(pages):
+                    return self._send(pages[n - 1].read_bytes(), "image/png")
+                return self.send_json({"ok": False}, 404)
             if name == "proposal-diff":
                 return self.send_json({"ok": True, "diff": st.proposals.diff(params.get("name", [""])[0])})
             if name == "capture":
@@ -348,6 +398,8 @@ def build_handler(st: Studio):
             payload = self._json_body()
             if name == "capture":
                 return self._save_capture(payload)
+            if name == "attach":
+                return self._attach(payload)
             if name == "save":
                 return self._save_request(payload)
             if name.startswith("ai/"):
@@ -403,6 +455,28 @@ def build_handler(st: Studio):
             (folder / f"{cid}.{ext}").write_bytes(raw)
             self.send_json({"ok": True, "id": cid, "file": f"{cfg.rel(folder)}/{cid}.{ext}"})
 
+        def _attach(self, payload: dict) -> None:
+            """받은 편지함에 파일을 첨부한다 (끌어 놓기·＋ 첨부). 남의 폴더에는 쓰지 않으려고 받은 편지함에서만 받는다."""
+            if not cfg.inbox:
+                return self.send_json({"ok": False, "message": "첨부는 받은 편지함에서만 돼요."}, 400)
+            name = Path(str(payload.get("name") or "")).name.strip()
+            name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name)[:120].lstrip(".")
+            data = str(payload.get("data") or "")
+            m = re.fullmatch(r"data:[^;,]*(;base64)?,(.*)", data, re.S)
+            if not name or not m or not m.group(1):
+                return self.send_json({"ok": False, "message": "파일을 읽지 못했어요."}, 400)
+            try:
+                raw = base64.b64decode(m.group(2))
+            except (ValueError, binascii.Error):
+                return self.send_json({"ok": False, "message": "파일을 읽지 못했어요."}, 400)
+            target = cfg.web_root / name
+            stem, suffix, k = target.stem, target.suffix, 2
+            while target.exists():  # 같은 이름이 있으면 덮지 않고 (2) 를 붙인다
+                target = cfg.web_root / f"{stem} ({k}){suffix}"
+                k += 1
+            target.write_bytes(raw)
+            self.send_json({"ok": True, "file": target.name, "kind": artifacts.kind_of(target)})
+
         def _proposal_action(self, action: str, payload: dict) -> None:
             name = Path(str(payload.get("name") or "")).name
             request = Path(str(payload.get("request") or "")).name
@@ -412,11 +486,14 @@ def build_handler(st: Studio):
                     raise ValueError("이 앱은 시안을 만들지 않게 설정돼 있어요. 저장본을 Claude Code 에 넘겨 주세요.")
                 if action in ("start", "revise") and not (request and (cfg.requests_dir / f"{request}.json").is_file()):
                     raise ValueError("저장본을 못 찾았어요.")
+                queue = [Path(str(q)).name for q in (payload.get("queue") or [])][:30]
+                if any(not (cfg.requests_dir / f"{q}.json").is_file() for q in queue):
+                    raise ValueError("목록의 저장본을 못 찾았어요.")
                 if action == "start":
-                    meta = pm.create(request, str(payload.get("title") or ""))
+                    meta = pm.create(request, str(payload.get("title") or ""), queue)
                     return self.send_json({"ok": True, "name": meta["name"]})
                 if action == "revise":
-                    pm.revise(name, request)
+                    pm.revise(name, request, queue)
                     return self.send_json({"ok": True, "name": name})
                 if action == "cancel":
                     pm.cancel(name)
@@ -437,6 +514,10 @@ def build_handler(st: Studio):
             route = urlparse(self.path).path
             kind, value = cfg.decide(self.command, route)
             body = self._body() if self.command not in ("GET", "HEAD") else b""
+            if st.upstream is None:  # 작업물 모드: 앱이 없다. 없는 파일은 404, 쓰기는 했다 치고
+                if kind == "pass":
+                    return self.send_json({"ok": False, "message": "없는 파일이에요."}, 404)
+                kind = "fake"
             if kind == "deny":
                 return self.send_json({"ok": False, "studio": True, "message": "디자인 스튜디오에서는 하지 않아요."}, 400)
             if kind == "mock":
@@ -546,10 +627,24 @@ class ExclusiveServer(ThreadingHTTPServer):
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    app = Path(args.app) if args.app else appconfig.find_app_config(args.project or ".")
-    if not app or not app.is_file():
-        sys.exit("이 앱의 스튜디오 설정이 없어요. 먼저 `python -m studio init --project <앱 저장소>` 로 만들고 다듬어 주세요.")
-    cfg = appconfig.load(app, args.project or None, args.mode or None)
+    cfg = None
+    if args.target:
+        t = Path(args.target).expanduser()
+        found = appconfig.find_app_config(t) if t.is_dir() else None
+        if found:  # 개인화한 앱 저장소를 가리켰으면 앱 모드
+            args.project = str(t)
+            cfg = appconfig.load(found, t, args.mode or None)
+        else:
+            cfg = artifacts.make_config(t)
+    else:
+        app = Path(args.app) if args.app else appconfig.find_app_config(args.project or ".")
+        if app and app.is_file():
+            cfg = appconfig.load(app, args.project or None, args.mode or None)
+        elif args.project or args.app:
+            sys.exit("이 앱의 스튜디오 설정이 없어요. 먼저 `python -m studio init --project <앱 저장소>` 로 만들고 다듬어 주세요.")
+        else:
+            print("앱 설정이 없어 받은 편지함으로 열어요 (파일을 끌어 놓아 첨부). 웹 앱이면 먼저 `init`.", flush=True)
+            cfg = artifacts.make_config(None)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # 끌 때도 앱 서버를 함께 끄게 (atexit)
     if not args.snapshot:
         appconfig.write_session(cfg)
@@ -567,7 +662,7 @@ def main(argv: list[str] | None = None) -> None:
     st.port = server.server_address[1]
     url = f"http://127.0.0.1:{st.port}/"
     print(f"디자인 스튜디오 · {cfg.name} ({cfg.mode}) : {url}", flush=True)
-    print(f"앱 서버: {upstream}", flush=True)
+    print(f"앱 서버: {upstream}" if upstream else f"작업물: {cfg.web_root}" + (f" / {cfg.entry}" if cfg.entry else ""), flush=True)
     print(f"저장 위치: {cfg.requests_dir}", flush=True)
     print(f"시안 만들기(claude): {st.proposals.claude_path() or '없음 — 저장본을 직접 Claude Code 에 넘겨 주세요'}", flush=True)
     if not args.no_open:
