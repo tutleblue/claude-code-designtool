@@ -654,6 +654,140 @@ def agent_checks() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def hardening_checks() -> None:
+    """검증(여러 눈 검토)에서 찾은 것들이 다시 생기지 않게: 파일 노출·스크립트 심기·큰 파일·망가진 파일·반영 범위·파일 간 적용."""
+    from html.parser import HTMLParser
+    from playwright.sync_api import sync_playwright
+    sys.path.insert(0, str(ROOT / "tests"))
+    from fixtures import docx
+
+    tmp = Path(tempfile.mkdtemp(prefix="studio-hard-"))
+    procs: list[subprocess.Popen] = []
+    env = {**os.environ, "STUDIO_WORK": str(tmp / "work"), "PYTHONIOENCODING": "utf-8"}
+
+    def launch(args: list[str], port: int) -> str:
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "studio", "open", *args, "--no-open", "--port", str(port)],
+                                cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+        procs.append(proc)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if line.startswith("디자인 스튜디오") and "http://" in line:
+                return line[line.index("http://"):].strip()
+            if proc.poll() is not None:
+                break
+        return ""
+
+    def get(url: str, headers: dict | None = None) -> tuple[int, dict, bytes]:
+        req = urllib.request.Request(url, headers=headers or {})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, dict(r.headers), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read()
+
+    try:
+        home = tmp / "home"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".ssh" / "id_rsa").write_text("SECRET", encoding="utf-8")
+        (home / "taxes.txt").write_text("PRIVATE", encoding="utf-8")
+        (home / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        (home / "a&b #1.md").write_text("# 이름에 기호\n", encoding="utf-8")
+        (home / "evil.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', encoding="utf-8")
+        (home / "report.md").write_text("[Z![A](./](./)REST) ![ onerror=alert(1) y](./x)\n", encoding="utf-8")
+        (home / "broken.docx").write_text("zip 이 아님", encoding="utf-8")
+        (home / "big.csv").write_text("a,b\n" + "x" * 200_000 + ",1\n", encoding="utf-8")
+        (home / "clip.mp4").write_bytes(bytes(range(256)) * 40)
+        weird = home / "x<" / "script><svg onload=alert(1)>"
+        try:
+            weird.mkdir(parents=True)
+            (weird / "a.md").write_text("hi", encoding="utf-8")
+        except OSError:
+            weird = None  # Windows 는 이런 이름을 못 만든다
+
+        one = launch([str(home / "report.md")], 8971)
+        s1, _, b1 = get(one + ".ssh/id_rsa")
+        s2, _, b2 = get(one + "taxes.txt")
+        s3, _, _ = get(one + "logo.png")
+        check("파일 하나만 열면 옆의 숨김·문서 파일은 안 줌 (그림·CSS 같은 것만)", s1 == 404 and s2 == 404 and s3 == 200 and b"SECRET" not in b1 + b2,
+              f".ssh {s1} · taxes {s2} · logo {s3}")
+        _, _, page = get(one + "?frame=1")
+        tags = []
+
+        class P(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                tags.append((tag, [a for a, _ in attrs]))
+        P().feed(page.decode("utf-8"))
+        check("마크다운에 심은 onerror 가 속성으로 살아나지 않음", not any(a.startswith("on") for _, attrs in tags for a in attrs))
+
+        folder = launch([str(home)], 8972)
+        s, h, _ = get(folder + "evil.svg")
+        check("원본 SVG·문서를 주소로 열면 스크립트 없이 (CSP sandbox)", s == 200 and h.get("Content-Security-Policy") == "sandbox")
+        s, h, body = get(folder + "clip.mp4", {"Range": "bytes=10-19"})
+        check("영상은 Range 로 일부만 (206)", s == 206 and body == bytes(range(10, 20)) and h.get("Content-Range") == "bytes 10-19/10240", f"{s} {h.get('Content-Range')}")
+        _, _, listing = get(folder + "?frame=1")
+        check("이름에 & # 가 있어도 그 파일로 가는 링크 (주소 인코딩)", "file=a%26b%20%231.md" in listing.decode("utf-8"))
+        _, _, b = get(folder + "?frame=1&file=" + urllib.parse.quote("a&b #1.md"))
+        check("이름에 & # 가 있는 파일이 열림", "이름에 기호" in b.decode("utf-8"))
+        _, _, b = get(folder + "?frame=1&file=broken.docx")
+        _, _, c = get(folder + "?frame=1&file=big.csv")
+        check("망가진 docx·아주 긴 칸의 CSV 도 빈 화면 대신 보여 줌", "보여 주지 못했어요" in b.decode("utf-8") and 'data-ref="B2"' in c.decode("utf-8"))
+        if weird:
+            rel = urllib.parse.quote("x</script><svg onload=alert(1)>/a.md")
+            _, _, b = get(folder + "?frame=1&file=" + rel)
+            check("파일 이름의 </script> 로 스튜디오 정보 태그를 못 깸", b"</script><svg" not in b)
+
+        # 반영: 파일 하나만 연 작업물은 AI 가 옆에 새로 만든 파일을 쓰지 않는다
+        from studio.artifacts import make_config
+        from studio.proposals import ProposalManager
+        os.environ["STUDIO_WORK"] = str(tmp / "work")
+        cfg = make_config(home / "report.md")
+        pm = ProposalManager(cfg, manage=False)
+        d = cfg.proposals_dir / "p1"
+        (d / "web").mkdir(parents=True)
+        (d / "base").mkdir()
+        for sub in ("web", "base"):
+            shutil.copy2(home / "report.md", d / sub / "report.md")
+        (d / "web" / "report.md").write_text("고친 글\n", encoding="utf-8")
+        (d / "web" / "startup.bat").write_text("echo pwn\n", encoding="utf-8")
+        pm.save({"name": "p1", "status": "ready", "rounds": [{"request": "r1"}], "activity": []})
+        r = pm.apply("p1")
+        check("파일 하나만 연 작업물 반영은 그 파일만 (옆에 새 파일을 쓰지 않음)", r["applied"] == ["report.md"] and not (home / "startup.bat").exists(), str(r["applied"]))
+
+        # 다른 파일에서 고친 글자가 이 파일에 얹히지 않는다
+        (home / "other.md").write_text("# 다른 제목\n", encoding="utf-8")
+        (home / "first.md").write_text("# 첫 제목\n", encoding="utf-8")
+        host = "document.querySelector('#__studio').shadowRoot"
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={"width": 1440, "height": 900})
+            pg.goto(folder + "?file=first.md")
+            pg.wait_for_timeout(1500)
+            pg.keyboard.press("s")
+            h1 = pg.frame_locator("#app").locator("h1").bounding_box()
+            pg.mouse.dblclick(h1["x"] + 10, h1["y"] + 8)
+            pg.wait_for_timeout(200)
+            pg.keyboard.press("End")
+            pg.keyboard.type(" 고침")
+            pg.keyboard.press("Enter")
+            pg.wait_for_timeout(600)
+            pg.evaluate(f"() => {host}.querySelector('[data-tab=\"files\"]').click()")
+            pg.wait_for_timeout(300)
+            pg.evaluate(f"() => {host}.querySelector('[data-open-file=\"other.md\"]').click()")
+            pg.wait_for_timeout(1500)
+            title = pg.main_frame.child_frames[0].evaluate("() => document.querySelector('h1').textContent")
+            check("작업물: 한 파일에서 고친 글자가 다른 파일에 얹히지 않음", title == "다른 제목", title)
+            b.close()
+    finally:
+        for proc in procs:
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> None:
     if WORK.exists():
         shutil.rmtree(WORK)
@@ -671,6 +805,7 @@ def main() -> None:
     capture_ask_checks()
     artifact_checks()
     agent_checks()
+    hardening_checks()
     apply_checks()
     if name:
         snapshot_check(name)

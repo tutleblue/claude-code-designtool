@@ -358,6 +358,8 @@
   }
 
   function applyDom(c) {
+    // 작업물: 선택자가 같은 다른 파일(다른 .md 의 h1 등)에 얹혀 그 파일 글이 바뀌어 보였다 (검토에서 재현)
+    if (ART && c.target && c.target.view !== viewKey()) return false;
     const el = resolve(c.target, c._el);
     if (!el) return false;
     c._el = el;
@@ -521,6 +523,10 @@
     }
   })();
   const IN_SHELL = TOP !== window;
+  // 바깥 틀(TOP)에 거는 처리기는 앱 화면(iframe)이 새로 뜰 때마다 쌓였다(파일 4번 옮기면 keydown·blur·resize 가 5개씩, 검토에서 실측).
+  // 이 신호로 걸고, 이 화면이 떠날 때(pagehide) 한 번에 뗀다
+  const topAbort = new AbortController();
+  const onTop = { signal: topAbort.signal };
   const ovHost = document.createElement("div");
   ovHost.id = "__studio-ov";
   const ovRoot = ovHost.attachShadow({ mode: "open" });
@@ -678,7 +684,24 @@
   // AI CLI 가 바로 고칠 수 있나: 그 AI 가 이 컴퓨터에 있고, 시안을 켜 두었고, 작업물이면 글자 파일(또는 폴더)일 때
   const AGENT_LABEL = { claude: "Claude", gemini: "Gemini", codex: "Codex" };
   const agentsHere = () => Object.keys(AGENT_LABEL).filter((a) => (INFO.agents || { claude: INFO.claude })[a]);
-  const claudeCan = () => agentsHere().length && INFO.proposals !== false && (!ART || ART.editable || !ART.file);
+  // 작업물: 요청이 걸린 파일들 (댓글·바뀐 것의 파일). 그림을 열어 둔 채 보내도 md 에 단 댓글이면 AI 가 고칠 수 있다 (검토)
+  const EDIT_KINDS = new Set(["html", "markdown", "code", "json", "csv", "svg"]);
+  const fileKind = (f) => (S.files.find((x) => x.file === f) || {}).kind || (ART && f === ART.file ? ART.kind : "");
+  function involvedFiles(data) {
+    const set = new Set();
+    (data.comments || []).forEach((c) => c.anchor && c.anchor.view && set.add(c.anchor.view));
+    (data.variants || []).forEach((v) => (v.changes || []).forEach((c) => c.target && c.target.view && set.add(c.target.view)));
+    set.delete("목록");
+    if (!set.size && ART && ART.file) set.add(ART.file);
+    return [...set];
+  }
+  const anyEditable = (files) => files.some((f) => EDIT_KINDS.has(fileKind(f)));
+  function editableNow() {
+    if (!ART) return true;
+    const files = [...involvedFiles({ comments: S.comments, variants: S.variants }), ...S.queue.flatMap((q) => involvedFiles(q.data))];
+    return files.length ? anyEditable(files) : (ART.editable || !ART.file);
+  }
+  const claudeCan = () => agentsHere().length && INFO.proposals !== false && editableNow();
   const destAgent = () => (agentsHere().includes(S.dest) ? S.dest : agentsHere()[0]);
   const canRun = () => claudeCan() && S.dest !== "copy";
   function askHtml() {
@@ -720,6 +743,10 @@
         <button class="mini queue" data-act="ask-queue" title="보낼 목록에 담고 다음 요청 쓰기 (Ctrl+Enter)">＋ 담기</button></div></div>
     </footer>`;
   }
+  const askText = () => {
+    const box = root.querySelector("[data-ask]");
+    return box ? box.value : S.ask;
+  };
   async function postJson(path, body) {
     return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
   }
@@ -776,21 +803,23 @@
     const now = currentItem();
     const items = [...S.queue, ...(now ? [now] : [])];
     if (!items.length) return toast("할 말을 적거나 댓글·캡처를 남겨 주세요");
+    // 보낼 것은 지금 떼어 내고 화면을 바로 비운다. 예전엔 다 보낸 뒤에 비워, 보내는 몇 초 사이에 단 댓글·담은 요청이 함께 지워졌다 (검토)
+    S.queue = [];
+    saveQueue();
+    if (now) clearHandedOff();
     S.sending = true;
-    renderPanel();
+    render();
     const names = [];
     try {
       for (const it of items) {
-        const res = await postJson("/__studio/save", { data: it.data, markdown: it.md });
-        if (!res.ok) throw new Error(res.message || "저장하지 못했어요");
-        names.push(res.name);
+        if (!it.saved) {  // 지난번에 저장까지 하고 시작에서 실패한 것은 다시 저장하지 않는다 (저장본이 겹쳐 생겼다)
+          const res = await postJson("/__studio/save", { data: it.data, markdown: it.md });
+          if (!res.ok) throw new Error(res.message || "저장하지 못했어요");
+          it.saved = res.name;
+        }
+        names.push(it.saved);
       }
       S.savedAs = names[names.length - 1];
-      const done = () => {
-        S.queue = [];
-        saveQueue();
-        clearHandedOff();
-      };
       if (!canRun()) {
         // 다른 AI(채팅·다른 CLI)에 붙여 넣을 한 덩어리. 여러 개면 번호를 붙여 차례로 하게 한다
         const dir = INFO.requests || ".design-studio/requests";
@@ -798,7 +827,6 @@
           : `아래 요청 ${items.length}개를 차례로 해 주세요. 하나 끝날 때마다 무엇을 했는지 짧게 알려 주세요.\n\n`
             + items.map((it, i) => `---\n\n## 요청 ${i + 1}\n\n${it.md.replace(/^# /m, "### ")}`).join("\n\n");
         await copy(`${body}\n\n(저장본: ${names.map((x) => `${dir}/${x}.md`).join(", ")})`);
-        done();
         render();
         return toast(items.length > 1 ? `요청 ${items.length}개를 모아서 복사했어요` : "모아서 복사했어요. 쓰는 AI 에 붙여 넣으세요");
       }
@@ -807,13 +835,15 @@
         revise ? { name: INFO.ctx, request: names[0], queue: names.slice(1) }
           : { request: names[0], queue: names.slice(1), title: items[0].title, agent: destAgent() });
       if (!started.ok) throw new Error(started.message || "Claude 에게 넘기지 못했어요");
-      done();
       if (!revise) return setCtx(started.name, items.length > 1 ? `요청 ${items.length}개를 차례로 고쳐요` : "Claude 가 고치는 대로 화면이 새로 보여요");
       await refreshProposals();
       render();
       toast(items.length > 1 ? `요청 ${items.length}개를 차례로 고치기 시작했어요` : "Claude 가 이어서 고치기 시작했어요");
     } catch (err) {
-      toast(`${names.length ? "저장은 했는데 " : ""}${err.message}`);
+      // 못 보낸 것은 목록 맨 앞으로 되돌린다 (그사이 새로 담은 것은 뒤에)
+      S.queue = [...items, ...S.queue];
+      saveQueue();
+      toast(`${names.length ? "저장은 했는데 " : ""}${err.message} — 보낼 목록에 남겨 두었어요`);
     } finally {
       S.sending = false;
       renderPanel();
@@ -894,9 +924,10 @@
     document.cookie = name ? `studio_web=${encodeURIComponent(name)}; path=/; SameSite=Lax` : "studio_web=; path=/; max-age=0; SameSite=Lax";
     try {
       if (hint) sessionStorage.setItem("studio-hint", hint);
-      // 새로 띄운 뒤 같은 화면·테마·스크롤·탭으로 (원래↔시안을 오갈 때 첫 화면으로 돌아가면 비교가 안 됐다)
-      sessionStorage.setItem("studio-restore", JSON.stringify({ view: viewKey(), theme: themeKey(), y: scrollY, tab: S.tab, mode: S.mode === "capture" ? "browse" : S.mode, live }));
+      // 새로 띄운 뒤 같은 화면·테마·스크롤·탭으로 (원래↔시안을 오갈 때 첫 화면으로 돌아가면 비교가 안 됐다). 쓰던 말도
+      sessionStorage.setItem("studio-restore", JSON.stringify({ view: viewKey(), theme: themeKey(), y: scrollY, tab: S.tab, mode: S.mode === "capture" ? "browse" : S.mode, live, ask: askText() }));
     } catch { /* 이어 보기만 안 된다 */ }
+    flushDraft();
     location.reload();
   }
   let propSig = "";
@@ -1019,9 +1050,9 @@
   function openFile(file) {
     // 다른 파일로 가도 댓글·캡처는 이어진다 (임시본에 바로 남기고, '이어서 열었어요' 알림은 띄우지 않는다)
     try {
-      if (S.dirty) localStorage.setItem(DRAFT_KEY, JSON.stringify(snapshot()));
-      sessionStorage.setItem("studio-restore", JSON.stringify({ tab: S.tab, mode: S.mode === "capture" ? "browse" : S.mode, live: true }));
+      sessionStorage.setItem("studio-restore", JSON.stringify({ tab: S.tab, mode: S.mode === "capture" ? "browse" : S.mode, live: true, ask: askText() }));
     } catch { /* 이어 하기만 안 된다 */ }
+    flushDraft();
     location.href = `/?frame=1${file ? `&file=${encodeURIComponent(file)}` : ""}`;
   }
   async function attachFiles(list) {
@@ -2413,8 +2444,10 @@
     const v = data.variants[data.chosen];
     L.push(`# ${ART ? "작업물 수정 요청" : "디자인 요청"}: ${data.title || "(제목 없음)"}`, "");
     if (ART) {
-      L.push(`- 작업물: \`${ART.root}${ART.file ? "/" + ART.file : ""}\` (${ART.label})`);
-      if (!ART.editable && ART.file) L.push("- 이 형식은 글자 파일이 아니다. 원본을 만든 도구·스크립트·소스가 있으면 그것을 고치고, 없으면 바꿀 내용을 정확히 적어 준다.");
+      const files = involvedFiles(data);
+      L.push(`- 작업물 폴더: \`${ART.root}\``);
+      L.push(`- 고칠 파일: ${files.map((f) => `\`${f}\``).join(", ") || "(폴더 전체)"}`);
+      if (files.length && !anyEditable(files)) L.push("- 이 형식은 글자 파일이 아니다. 원본을 만든 도구·스크립트·소스가 있으면 그것을 고치고, 없으면 바꿀 내용을 정확히 적어 준다.");
     }
     L.push(`- 저장: ${new Date().toLocaleString("ko-KR")} · 앱 v${data.app.version} · ${data.app.data === "real" ? "내 데이터" : "연습용 데이터"}`);
     if (!DOC) L.push(`- 창 크기 ${data.viewport.w}×${data.viewport.h} · 테마 ${themeLabel(data.theme)} · 마지막 화면 ${viewLabel(data.view)}`);
@@ -2644,6 +2677,12 @@
      저장에 성공하면 지운다 — 남겨 두면 Claude 가 반영한 뒤 다시 열었을 때 같은 변경이 한 번 더 얹힌다
      (사이드바 단추를 두 번 옮기는 식). 저장한 것을 이어 하려면 '저장본 불러오기' 를 쓴다. */
   let draftTimer = 0;
+  function flushDraft() {
+    // 400ms 미루어 남기는 사이에 화면이 새로 뜨면(시안 새로 보기·원래/시안) 마지막 댓글이 사라졌다 (검토에서 재현)
+    if (!S.dirty) return;
+    clearTimeout(draftTimer);
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(snapshot())); } catch { /* 이어 하기만 안 된다 */ }
+  }
   function saveDraftSoon(changed = true) {
     if (changed) S.dirty = true;
     if (!S.dirty) return;
@@ -2885,7 +2924,7 @@
   }, true);
   window.addEventListener("scroll", closeCtxMenu, true);
   // 창 전체가 초점을 잃을 때만 닫는다. 앱 iframe 의 blur 로 닫으면, 메뉴(바깥 틀)에 초점을 주는 순간 닫혀 버렸다.
-  TOP.addEventListener("blur", () => ovHost.isConnected && closeCtxMenu());
+  TOP.addEventListener("blur", () => ovHost.isConnected && closeCtxMenu(), onTop);
   ovRoot.addEventListener("click", onStudioClick);
   let stepDrag = -1;
   root.addEventListener("dragstart", (e) => {
@@ -2995,7 +3034,7 @@
       e.preventDefault();
       return closeCtxMenu();
     }
-    if (S.editing) {
+    if (S.editing && !fromStudio(e)) {
       if (S.editing.contains(e.target)) {
         e.stopPropagation(); // 앱 단축키(검색 Ctrl+K 등)가 글자 입력을 가로채지 않게
         if (e.key === "Enter" && !e.shiftKey) {
@@ -3050,7 +3089,7 @@
       return handled(), render();
     }
     if (/^[1-9]$/.test(k) && S.variants[+k - 1]) return handled(), switchVariant(+k - 1);
-    if (S.mode === "select" && S.sel && e.shiftKey && /^arrow/.test(k)) {
+    if (S.mode === "select" && S.sel && e.shiftKey && /^arrow/.test(k) && !DOC) {
       const step = e.ctrlKey || e.metaKey ? 10 : 1;
       const [bx, by] = parseTranslate(S.sel.el);
       const dx = k === "arrowleft" ? -step : k === "arrowright" ? step : 0;
@@ -3068,16 +3107,19 @@
   window.addEventListener("keydown", onKey, true);
   // 시안·원래를 오가면 iframe(앱)만 새로 뜬다. 바깥 틀에 건 처리기는 예전 앱 것이 남으니, 앱이 사라졌으면 스스로 뗀다.
   function onTopKey(e) {
-    if (!ovHost.isConnected) return TOP.removeEventListener("keydown", onTopKey, true);
     onKey(e);
   }
   function onTopResize() {
-    if (!ovHost.isConnected) return TOP.removeEventListener("resize", onTopResize);
     setBarHeight();
     renderPanel();
     renderAi();
   }
-  if (IN_SHELL) TOP.addEventListener("keydown", onTopKey, true);
+  if (IN_SHELL) TOP.addEventListener("keydown", onTopKey, { capture: true, signal: topAbort.signal });
+  window.addEventListener("pagehide", () => {
+    topAbort.abort();
+    stopShotStream(); // 캡처 모드에서 파일을 옮기거나 새로 뜨면 탭 공유가 켜진 채 남았다 (검토)
+    flushDraft();
+  });
 
   /* ---------- 알림 ---------- */
   let toastTimer = 0;
@@ -3094,7 +3136,7 @@
   wirePicker();
   TOP.document.querySelectorAll("#__studio").forEach((n) => n.remove());
   TOP.document.body.appendChild(host);
-  if (IN_SHELL) TOP.addEventListener("resize", onTopResize);
+  if (IN_SHELL) TOP.addEventListener("resize", onTopResize, onTop);
   refreshProposals();
   setInterval(refreshProposals, 2500);
   try {
@@ -3155,6 +3197,7 @@
       if (restore.theme) applyAppTheme(restore.theme);
       if (restore.view && APP.switchView && restore.view !== viewKey()) APP.switchView(restore.view);
       if (restore.tab) S.tab = restore.tab;
+      if (restore.ask) S.ask = restore.ask;
       if (restore.mode && restore.mode !== S.mode) setMode(restore.mode);
       if (restore.y) setTimeout(() => scrollTo(0, restore.y), 300);
     }

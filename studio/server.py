@@ -247,16 +247,67 @@ def build_handler(st: Studio):
                 ctype = mimetypes.guess_type(local.name)[0] or "application/octet-stream"
                 if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
                     ctype += "; charset=utf-8"
-                return self._send(local.read_bytes(), ctype)
+                return self._send_file(local, ctype)
             self._dispatch()
+
+        def _send_file(self, path: Path, ctype: str) -> None:
+            """파일을 조금씩 보낸다 (Range 206 포함). 통째로 읽어 보내면 1.5GB 영상 하나에 서버 메모리가 1.5GB 가 됐고,
+            Safari·맥 WebView 는 206 을 못 받으면 <video> 를 틀지 않는다 (검토에서 재현)."""
+            size = path.stat().st_size
+            start, end, status = 0, size - 1, 200
+            m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                else:
+                    start = max(0, size - int(m.group(2)))
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                status = 206
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(max(0, end - start + 1)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            if cfg.artifact:
+                # 작업물의 원본 파일(SVG·XML·다른 HTML 등)을 주소로 바로 열면 스크립트 없이 따로 떼어 연다.
+                # 스튜디오와 같은 출처에서 돌면 시안 시작·파일 읽기를 할 수 있었다 (검토에서 SVG 로 재현). 그림·CSS·JS 에는 영향 없다
+                self.send_header("Content-Security-Policy", "sandbox")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            left = end - start + 1
+            with path.open("rb") as fh:
+                fh.seek(start)
+                while left > 0:
+                    chunk = fh.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
 
         def _local_file(self, route: str) -> Path | None:
             """시안 폴더에 있는 글자 파일은 그것을 준다 (그림 등은 시안에 없으니 앱이 준다).
             작업물 모드는 앱이 없으니 시안에 없으면 원본 폴더에서 준다."""
             bases = [self._web_override()]
+            rel = unquote(route).lstrip("/")
             if cfg.artifact:
                 bases.append(cfg.web_root)
-            rel = unquote(route).lstrip("/")
+                # 숨김 파일·폴더(.ssh 등)는 주지 않는다. 파일 하나만 연 경우(부모 폴더가 홈·다운로드일 수 있다)는
+                # 그 파일과 그것이 쓸 만한 그림·CSS·JS·글꼴·소리·영상만 준다 (검토: ~/report.md 를 열면 ~/.ssh/id_rsa 가 읽혔다)
+                parts = rel.split("/")
+                if any(p in ("", ".", "..") or p.startswith(".") or p in artifacts.SKIP_DIRS for p in parts):
+                    return None
+                if cfg.files is not None and rel not in cfg.files and Path(rel).suffix.lower() not in artifacts.ASSET_EXT:
+                    return None
             for base in bases:
                 if not base:
                     continue
@@ -310,7 +361,8 @@ def build_handler(st: Studio):
             head = ('<link rel="stylesheet" href="/__studio/studio-fonts.css" />\n'
                     '<link rel="stylesheet" href="/__studio/studio.css" />\n')
             # 앱 스크립트가 다 돈 뒤 붙도록 body 끝에, defer 로 (defer 끼리는 문서 순서대로 돈다)
-            tail = (f"<script>window.__STUDIO__ = {json.dumps(info, ensure_ascii=False)};</script>\n"
+            # '<' 를 \u003c 로: 파일 이름에 </script> 가 들어 있으면 이 태그를 닫고 스크립트를 심을 수 있었다 (검토에서 재현)
+            tail = (f"<script>window.__STUDIO__ = {json.dumps(info, ensure_ascii=False).replace('<', chr(92) + 'u003c')};</script>\n"
                     + ('<script src="/__studio/app-client.js" defer></script>\n' if cfg.client_path else "")
                     + '<script src="/__studio/studio.js" defer></script>\n')
             html = _insert_before(html, "</head>", head)
