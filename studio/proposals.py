@@ -54,13 +54,14 @@ SKIP_DIRS = {".git", "node_modules", ".design-studio", "__pycache__", ".venv"}
 
 
 def _text_files(root: Path) -> list[str]:
+    # 숨김 파일·폴더는 빼고 들어가지도 않는다. 작업물 폴더의 .gemini/settings.json 같은 AI 설정이 시안 폴더(=그 AI 의
+    # 작업 폴더)로 따라 들어가 MCP 서버를 띄울 수 있었다 (검토). node_modules 등도 훑지 않는다
     out = []
-    for p in root.rglob("*"):
-        rel = p.relative_to(root)
-        if any(part in SKIP_DIRS for part in rel.parts[:-1]):
-            continue
-        if p.is_file() and p.suffix.lower() in TEXT_EXT:
-            out.append(rel.as_posix())
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        for f in filenames:
+            if not f.startswith(".") and Path(f).suffix.lower() in TEXT_EXT:
+                out.append((Path(dirpath) / f).relative_to(root).as_posix())
     return sorted(out)
 
 
@@ -156,6 +157,8 @@ class ProposalManager:
         if not web.exists():
             return out
         for rel in _text_files(web):
+            if self.cfg.files is not None and rel not in self.cfg.files:
+                continue  # 파일 하나만 연 작업물: AI 가 옆에 새로 만든 파일은 반영하지 않는다 (홈 폴더에 startup.bat 이 생길 수 있었다)
             a, b = _read(base / rel), _read(web / rel)
             if a == b:
                 continue
@@ -195,9 +198,10 @@ class ProposalManager:
         d = self.dir(name)
         (d / "web").mkdir(parents=True)
         (d / "base").mkdir()
-        files = _text_files(self.web_root)
-        if self.cfg.files is not None:  # 작업물 하나만 연 경우: 그 파일만 (다운로드 폴더를 통째로 복사하지 않게)
-            files = [f for f in files if f in self.cfg.files]
+        if self.cfg.files is not None:  # 작업물 하나만 연 경우: 그 파일만 (홈·다운로드 폴더를 훑지도 복사하지도 않게)
+            files = [f for f in self.cfg.files if Path(f).suffix.lower() in TEXT_EXT and (self.web_root / f).is_file()]
+        else:
+            files = _text_files(self.web_root)
         for rel in files[:3000]:
             for target in (d / "web" / rel, d / "base" / rel):
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -210,7 +214,7 @@ class ProposalManager:
             "agent": agent if agent in AGENTS else "claude",  # 이 시안을 고치는 AI. 회차마다 바꾸지 않는다
         }
         self.save(meta)
-        self.run(name, request_stem, followup=False)
+        self._run_safely(name, request_stem, followup=False)
         return meta
 
     def revise(self, name: str, request_stem: str, queue: list[str] | None = None) -> dict:
@@ -230,7 +234,7 @@ class ProposalManager:
             meta["queue"] = list(queue or [])
             self.save(meta)
         # 지난 회차가 세션을 못 만들고 끝났으면(실행 실패·곧바로 멈춤) 이어 할 대화가 없다. 새 대화로 시작한다.
-        self.run(name, request_stem, followup=bool(meta.get("rounds")) and bool(meta.get("sessionStarted")))
+        self._run_safely(name, request_stem, followup=bool(meta.get("rounds")) and bool(meta.get("sessionStarted")))
         return meta
 
     def _rel_web(self, name: str) -> str:
@@ -310,8 +314,12 @@ class ProposalManager:
         return cmd
 
     def run(self, name: str, request_stem: str, followup: bool) -> None:
-        meta = self.load(name)
-        if meta and meta.get("agent", "claude") != "claude":
+        with self.lock:
+            meta = self.load(name)
+            # 앞 회차가 끝나고 다음 요청을 띄우기 직전에 '멈추기' 를 누르면, 멈춤을 덮고 다시 돌았다 (검토)
+            if not meta or meta.get("status") not in ACTIVE:
+                return
+        if meta.get("agent", "claude") != "claude":
             return self._run_other(name, request_stem, meta)
         claude = self.claude_path()
         if not claude:
@@ -431,7 +439,20 @@ class ProposalManager:
             meta["updatedAt"] = now_iso()
             self.save(meta)
         if next_request:
-            self.run(name, next_request, followup=bool(meta.get("sessionStarted")) or meta.get("agent", "claude") != "claude")
+            self._run_safely(name, next_request, followup=bool(meta.get("sessionStarted")) or meta.get("agent", "claude") != "claude")
+
+    def _run_safely(self, name: str, request_stem: str, followup: bool) -> None:
+        """회차를 띄우다 예외가 나면 '실패' 로 적는다. 예전엔 저장본 글이 이상하면 '대기' 에 영영 남고 '다시 시키기' 도 막혔다 (검토에서 재현)."""
+        try:
+            self.run(name, request_stem, followup)
+        except Exception as exc:  # noqa: BLE001
+            with self.lock:
+                meta = self.load(name)
+                if meta and meta.get("status") in ACTIVE:
+                    meta.update(status="failed", error=f"AI 를 띄우지 못했어요 ({exc}). '다시 시키기' 로 다시 할 수 있어요.", queue=[])
+                    if meta.get("rounds") and meta["rounds"][-1].get("status") == "running":
+                        meta["rounds"][-1].update(status="failed", finishedAt=now_iso())
+                    self.save(meta)
 
     # ---------- 다른 AI CLI (Gemini·Codex) ----------
     # Claude 처럼 세밀한 허락 목록이 없어서, '그 AI 를 시안 폴더 안에서 띄우고 그 폴더만 고치게' 묶는다.
@@ -477,7 +498,8 @@ class ProposalManager:
         except (OSError, json.JSONDecodeError):
             data = {}
         for c in data.get("comments") or []:
-            sid = str((c.get("shot") or {}).get("id") or "")
+            shot = c.get("shot") if isinstance(c, dict) else None
+            sid = str(shot.get("id") or "") if isinstance(shot, dict) else ""
             src = self.cfg.work_dir / "captures" / f"{sid}.png"
             if re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", sid) and src.is_file():
                 (web / ".studio-captures").mkdir(exist_ok=True)

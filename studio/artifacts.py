@@ -24,8 +24,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
+from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 from . import config as appconfig
@@ -55,6 +57,10 @@ KIND_LABEL = {
 EDITABLE = {"html", "markdown", "code", "json", "csv", "svg"}
 SKIP_DIRS = {".git", "node_modules", ".design-studio", "__pycache__", ".venv", "venv", ".claude"}
 MAX_TEXT = 2_000_000  # 이보다 큰 글 파일은 앞부분만 보여 준다 (보기 화면이 멈추지 않게)
+MAX_ZIP_MEMBER = 40_000_000  # docx·pptx·xlsx 안 XML 하나의 풀린 크기 상한 (400KB 파일이 400MB 로 풀리는 zip 폭탄을 막는다)
+# 파일 하나만 연 경우 그 옆에서 줄 수 있는 것 (HTML 작업물이 쓰는 그림·CSS·JS·글꼴·소리·영상). 문서·키 파일은 주지 않는다
+ASSET_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico", ".svg", ".css", ".js", ".mjs",
+             ".woff", ".woff2", ".ttf", ".otf", ".mp3", ".wav", ".ogg", ".m4a", ".mp4", ".webm", ".mov", ".m4v"}
 
 
 def kind_of(path: Path) -> str:
@@ -65,7 +71,8 @@ def kind_of(path: Path) -> str:
         if name.endswith(ext):
             return kind
     try:
-        head = path.read_bytes()[:2048]
+        with path.open("rb") as fh:  # 앞 2KB 만 (예전엔 통째로 읽어 1.5GB 파일 하나에 메모리가 1.5GB 가 됐다)
+            head = fh.read(2048)
     except OSError:
         return "other"
     if b"\0" not in head:  # 확장자가 낯설어도 글자 파일이면 글로 본다
@@ -78,17 +85,24 @@ def kind_of(path: Path) -> str:
 
 
 def work_root() -> Path:
-    return Path(os.environ.get("STUDIO_WORK") or Path.home() / ".claude" / "design-studio" / "work")
+    # resolve: 홈·작업 폴더가 바로가기(심볼릭 링크)를 거치면 서버의 '폴더 안인지' 비교가 늘 어긋났다
+    return Path(os.environ.get("STUDIO_WORK") or Path.home() / ".claude" / "design-studio" / "work").resolve()
+
+
+def walk_files(root: Path):
+    """숨김·SKIP_DIRS 폴더는 들어가지도 않고 파일을 차례로 (node_modules 를 다 훑고 거르면 5만 개에 1초가 걸렸다)."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
+        for f in sorted(filenames):
+            if not f.startswith("."):
+                yield Path(dirpath) / f
 
 
 def list_files(root: Path, limit: int = 400) -> list[dict]:
     out: list[dict] = []
-    for p in sorted(root.rglob("*")):
-        rel = p.relative_to(root)
-        if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
-            continue
+    for p in walk_files(root):
         if p.is_file():
-            out.append({"file": rel.as_posix(), "kind": kind_of(p), "size": p.stat().st_size})
+            out.append({"file": p.relative_to(root).as_posix(), "kind": kind_of(p), "size": p.stat().st_size})
             if len(out) >= limit:
                 break
     return out
@@ -208,13 +222,23 @@ def head_bar(rel: str, kind: str, extra: str = "", back: bool = False) -> str:
 
 
 # --- 마크다운: 덩어리마다 원본 줄 번호를 붙인다 (외부 라이브러리 없이, 글자는 모두 이스케이프) ---
-_INLINE = [
-    (re.compile(r"`([^`]+)`"), lambda m: f"<code>{m.group(1)}</code>"),
-    (re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)"), lambda m: f'<img alt="{m.group(1)}" src="{_safe_url(m.group(2))}">'),
-    (re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)"), lambda m: f'<a href="{_safe_url(m.group(2))}">{m.group(1)}</a>'),
-    (re.compile(r"\*\*([^*]+)\*\*"), lambda m: f"<b>{m.group(1)}</b>"),
-    (re.compile(r"(?<![*\w])\*([^*\n]+)\*(?!\*)"), lambda m: f"<i>{m.group(1)}</i>"),
-]
+# 한 번의 훑기로 모든 꼴을 바꾼다. 예전엔 꼴마다 따로 돌려, 앞에서 만든 <img src="…"> 를 뒤의 링크 꼴이 다시 잡아
+# 따옴표가 닫히고 onerror 가 살아났다 (검토에서 재현). 주소에는 괄호·공백·따옴표·꺾쇠·대괄호를 받지 않는다
+_URL = r"([^()\s\"<>\[\]]+)"
+_INLINE = re.compile(r"`([^`]+)`|!\[([^\]]*)\]\(" + _URL + r"\)|\[([^\]]+)\]\(" + _URL + r"\)|\*\*([^*]+)\*\*|(?<![*\w])\*([^*\n]+)\*(?!\*)")
+
+
+def _inline_one(m: re.Match) -> str:
+    code, alt, src, text, href, bold, ital = m.groups()
+    if code is not None:
+        return f"<code>{code}</code>"
+    if src is not None:
+        return f'<img alt="{alt}" src="{_safe_url(src)}">'
+    if href is not None:
+        return f'<a href="{_safe_url(href)}">{text}</a>'
+    if bold is not None:
+        return f"<b>{bold}</b>"
+    return f"<i>{ital}</i>"
 
 
 def _safe_url(u: str) -> str:
@@ -223,10 +247,7 @@ def _safe_url(u: str) -> str:
 
 
 def _inline(text: str) -> str:
-    out = esc(text)
-    for pat, fn in _INLINE:
-        out = pat.sub(fn, out)
-    return out
+    return _INLINE.sub(_inline_one, esc(text))
 
 
 def render_markdown(text: str) -> str:
@@ -321,7 +342,12 @@ def _col(c: int) -> str:
 def render_csv(text: str, delim: str) -> str:
     import csv
     import io
-    rows = list(csv.reader(io.StringIO(text), delimiter=delim))[:3000]
+    csv.field_size_limit(MAX_TEXT)  # 기본 128KB 를 넘는 칸이 하나만 있어도 예외로 화면이 빈칸이 됐다
+    rows = []
+    for row in csv.reader(io.StringIO(text), delimiter=delim):
+        rows.append(row)
+        if len(rows) >= 3000:
+            break
     width = max((len(r) for r in rows), default=0)
     head = "<tr><th></th>" + "".join(f"<th>{_col(c)}</th>" for c in range(width)) + "</tr>"
     body = []
@@ -340,6 +366,8 @@ S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 def _xml(z: zipfile.ZipFile, name: str) -> ET.Element | None:
     try:
+        if z.getinfo(name).file_size > MAX_ZIP_MEMBER:
+            return None
         return ET.fromstring(z.read(name))
     except (KeyError, ET.ParseError):
         return None
@@ -463,46 +491,70 @@ def page_images(cfg: appconfig.AppConfig, src: Path) -> list[Path]:
     done = sorted(out_dir.glob("page-*.png"), key=lambda p: int(re.search(r"(\d+)", p.stem).group(1)))
     if done:
         return done
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # 다 만든 뒤에만 캐시 자리에 둔다. 도중에 시간이 넘으면 앞 몇 쪽만 남아 그것이 영영 캐시로 쓰였다 (검토에서 재현)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=key + "-", dir=out_dir.parent))
     pdf = src
     t = tools()
-    if src.suffix.lower() != ".pdf":
-        if not t["soffice"]:
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        if src.suffix.lower() != ".pdf":
+            if not t["soffice"]:
+                return []
+            # 사용자 프로필을 따로 써야 이미 열린 LibreOffice 와 부딪치지 않는다. 파일 경로는 절대 경로라 '-' 로 시작하지 않는다
+            subprocess.run([t["soffice"], f"-env:UserInstallation=file:///{(work / 'lo').as_posix().lstrip('/')}",
+                            "--headless", "--convert-to", "pdf", "--outdir", str(work), str(src)],
+                           capture_output=True, timeout=180, creationflags=flags)
+            pdf = work / (src.stem + ".pdf")
+            if not pdf.is_file():
+                return []
+        if t["pdftoppm"]:
+            subprocess.run([t["pdftoppm"], "-r", "110", "-png", "-l", "200", str(pdf), str(work / "page")],
+                           capture_output=True, timeout=300, creationflags=flags)
+        elif t["fitz"]:
+            import fitz
+            with fitz.open(pdf) as d:
+                for i, pg in enumerate(d, 1):
+                    if i > 200:
+                        break
+                    pg.get_pixmap(dpi=110).save(str(work / f"page-{i}.png"))
+        pages = sorted(work.glob("page-*.png"), key=lambda p: int(re.search(r"(\d+)", p.stem).group(1)))
+        if not pages:
             return []
-        # 사용자 프로필을 따로 써야 이미 열린 LibreOffice 와 부딪치지 않는다
-        subprocess.run([t["soffice"], f"-env:UserInstallation=file:///{(out_dir / 'lo').as_posix().lstrip('/')}",
-                        "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(src)],
-                       capture_output=True, timeout=180, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        pdf = out_dir / (src.stem + ".pdf")
-        if not pdf.is_file():
-            return []
-    if t["pdftoppm"]:
-        subprocess.run([t["pdftoppm"], "-r", "110", "-png", "-l", "200", str(pdf), str(out_dir / "page")],
-                       capture_output=True, timeout=300, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    elif t["fitz"]:
-        import fitz
-        with fitz.open(pdf) as d:
-            for i, pg in enumerate(d, 1):
-                if i > 200:
-                    break
-                pg.get_pixmap(dpi=110).save(str(out_dir / f"page-{i}.png"))
-    return sorted(out_dir.glob("page-*.png"), key=lambda p: int(re.search(r"(\d+)", p.stem).group(1)))
+        out_dir.mkdir(exist_ok=True)
+        for pg in pages:
+            os.replace(pg, out_dir / pg.name)
+        return sorted(out_dir.glob("page-*.png"), key=lambda p: int(re.search(r"(\d+)", p.stem).group(1)))
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def render_pages(cfg: appconfig.AppConfig, rel: str, pages: list[Path]) -> str:
     return "\n".join(
-        f'<figure class="av-page" {_ref(f"p{k}", f"{k}쪽")}><img src="/__studio/page?file={esc(rel)}&n={k}" '
+        f'<figure class="av-page" {_ref(f"p{k}", f"{k}쪽")}><img src="/__studio/page?file={esc(quote(rel))}&n={k}" '
         f'data-natural="1" alt="{k}쪽"><figcaption>{k}쪽</figcaption></figure>' for k, _ in enumerate(pages, 1))
 
 
 def view(cfg: appconfig.AppConfig, base: Path, rel: str, mode: str = "") -> str:
+    """보기 화면 HTML. 망가진 파일(zip 이 아닌 docx, 깨진 CSV 등)이어도 빈 화면 대신 알림과 '파일 전체' 댓글 자리를 준다."""
+    try:
+        return _view(cfg, base, rel, mode)
+    except Exception as exc:  # noqa: BLE001 — 예전엔 연결이 그냥 끊겨 화면이 비었다 (검토에서 재현)
+        body = (f'<div class="av-doc"><p {_ref("file", "파일 전체")}><b>{esc(rel)}</b></p>'
+                f'<p class="av-note">이 파일을 보여 주지 못했어요 ({esc(type(exc).__name__)}). 파일 전체에 댓글을 달 수 있어요.</p></div>')
+        return page(rel or cfg.name, head_bar(rel, "other", "", not cfg.files) + body)
+
+
+def _view(cfg: appconfig.AppConfig, base: Path, rel: str, mode: str = "") -> str:
     """보기 화면 HTML. rel 이 비면 폴더 목록(받은 편지함이면 끌어 놓기 칸 포함)."""
     if not rel:
         files = list_files(base)
         drop = ('<div class="av-drop" id="avDrop">여기에 파일을 끌어 놓거나 <b>패널의 ＋ 첨부</b>를 누르세요.<br>'
                 '글·코드·표·그림·PDF·Word·PowerPoint·Excel·소리·영상 모두 돼요.</div>') if cfg.inbox else ""
         items = "".join(
-            f'<li {_ref("file:" + f["file"], f["file"])}><a href="/?frame=1&file={esc(f["file"])}">{esc(f["file"])}'
+            f'<li {_ref("file:" + f["file"], f["file"])}><a href="/?frame=1&file={esc(quote(f["file"]))}">{esc(f["file"])}'
             f'<em>{esc(KIND_LABEL.get(f["kind"], f["kind"]))} · {f["size"] // 1024 + 1} KB</em></a></li>' for f in files)
         body = f'{head_bar(cfg.name, "folder")}<div class="av-doc">{drop}<ul class="av-files">{items}</ul>' \
                f'{"" if files else "<p class=av-note>아직 파일이 없어요.</p>"}</div>'
@@ -512,7 +564,7 @@ def view(cfg: appconfig.AppConfig, base: Path, rel: str, mode: str = "") -> str:
         path = (cfg.web_root / rel).resolve()
     kind = kind_of(path)
     back = not cfg.files
-    url = "/" + "/".join(esc(p) for p in rel.split("/"))
+    url = "/" + esc(quote(rel))  # & # ? + % 가 든 이름도 그 파일로 (예전엔 엉뚱한 파일·목록으로 갔다)
     if kind == "markdown":
         text, cut = _read_text(path)
         body = f'<article class="av-doc">{render_markdown(text)}</article>'
@@ -553,7 +605,7 @@ def view(cfg: appconfig.AppConfig, base: Path, rel: str, mode: str = "") -> str:
     extra = ""
     if kind in ("docx", "pptx", "xlsx"):
         other = "" if mode == "pages" else "&mode=pages"
-        extra = f'<a href="/?frame=1&file={esc(rel)}{other}" style="margin-left:12px">{"글로 보기" if mode == "pages" else "쪽 모양으로 보기"}</a>'
+        extra = f'<a href="/?frame=1&file={esc(quote(rel))}{other}" style="margin-left:12px">{"글로 보기" if mode == "pages" else "쪽 모양으로 보기"}</a>'
     if kind in ("markdown", "code", "json", "csv") and locals().get("cut"):
         extra += '<span>너무 길어 앞부분만 보여요</span>'
     return page(rel, head_bar(rel, kind, extra, back) + body)

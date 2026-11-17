@@ -79,6 +79,7 @@ python <도구>/run_studio.py snapshot <저장본>       # (앱 폴더에서) �
 - **쓰기 막기**: 쓰기 요청은 기본으로 가짜 답을 받습니다. 바깥 연결 차단·가짜 데이터는 앱 프로세스 안의 런처가 맡습니다.
 - **스튜디오 API 보호**: 루프백 호스트만 받습니다. JSON이 아닌 POST는 거절합니다(CSRF). `X-Frame-Options: SAMEORIGIN`을 붙입니다.
 - **저장본 검사**: 저장본과 AI 추천 값은 화면에 넣기 전에 거릅니다(XSS·CSS 주입).
+- **작업물 원본**: 숨김 파일·폴더는 주지 않습니다. 파일 하나만 열면 그 파일과 옆의 그림·CSS·JS·글꼴·소리·영상만 줍니다(홈·다운로드 폴더의 다른 문서는 안 보임). 원본을 주소로 바로 열면 `CSP: sandbox` 로 스크립트 없이 엽니다. 반영은 연 파일에만 씁니다.
 - **캡처**: 그림은 PNG·JPEG 인지 확인하고 `<앱>/.design-studio/captures/`에만 둡니다. 정해진 모양의 이름으로만 읽습니다. 화면 공유는 캡처 모드에 있는 동안만 켜 둡니다.
 - **시안을 만드는 Gemini·Codex**: 시안 폴더를 작업 폴더로 띄워 그 안만 고치게 합니다. Gemini는 `--approval-mode auto_edit`(셸 명령은 못 함), Codex는 `exec --sandbox workspace-write`. 캡처는 시안 폴더 안으로 복사해 넘깁니다.
 - **시안을 만드는 Claude**:
@@ -91,7 +92,7 @@ python <도구>/run_studio.py snapshot <저장본>       # (앱 폴더에서) �
 ## 시험
 
 ```bash
-python tests/run.py   # 58개 항목: 예제 앱(examples/hello), 작업물 형식별(tests/fixtures.py), 캡처·보낼 목록은 가짜 claude 로
+python tests/run.py   # 68개 항목: 예제 앱(examples/hello), 작업물 형식별(tests/fixtures.py), 캡처·보낼 목록은 가짜 claude 로
 ```
 
 ## 폴더
