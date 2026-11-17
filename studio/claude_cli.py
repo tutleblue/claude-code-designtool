@@ -12,12 +12,23 @@ import subprocess
 from pathlib import Path
 
 
-def find_claude() -> str | None:
-    # STUDIO_CLAUDE 가 없는 파일을 가리키면 쓰지 않는다. 처음엔 그대로 믿어서, 시안이 '만드는 중' 에서 영영 멈췄다(검증 중 실측).
-    explicit = os.environ.get("STUDIO_CLAUDE")
+AGENTS = ("claude", "gemini", "codex")
+AGENT_LABEL = {"claude": "Claude", "gemini": "Gemini", "codex": "Codex"}
+
+
+def find_agent(name: str) -> str | None:
+    """AI CLI 경로. STUDIO_CLAUDE·STUDIO_GEMINI·STUDIO_CODEX 로 바꿀 수 있다.
+    가리킨 파일이 없으면 쓰지 않는다. 처음엔 그대로 믿어서, 시안이 '만드는 중' 에서 영영 멈췄다(검증 중 실측)."""
+    if name not in AGENTS:
+        return None
+    explicit = os.environ.get(f"STUDIO_{name.upper()}")
     if explicit:
         return explicit if Path(explicit).is_file() else shutil.which(explicit)
-    return shutil.which("claude")
+    return shutil.which(name)
+
+
+def find_claude() -> str | None:
+    return find_agent("claude")
 
 
 def child_env(proxy_env: dict | None) -> dict:
@@ -29,9 +40,9 @@ def child_env(proxy_env: dict | None) -> dict:
     return env
 
 
-def spawn(args: list[str], prompt: str, cwd: Path, proxy_env: dict | None = None) -> subprocess.Popen:
+def spawn(args: list[str], prompt: str, cwd: Path, proxy_env: dict | None = None, exe: str | None = None) -> subprocess.Popen:
     proc = subprocess.Popen(
-        [find_claude() or "claude", *args], cwd=cwd, env=child_env(proxy_env),
+        [exe or find_claude() or "claude", *args], cwd=cwd, env=child_env(proxy_env),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # Windows 에서 검은 창이 뜨지 않게

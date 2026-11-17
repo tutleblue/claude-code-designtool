@@ -42,7 +42,7 @@ from urllib.parse import parse_qs, urlparse, unquote
 from . import artifacts
 from . import config as appconfig
 from .ai import AIRunner
-from .claude_cli import kill_tree
+from .claude_cli import AGENTS, find_agent, kill_tree
 from .proposals import ProposalManager
 
 HERE = Path(__file__).resolve().parent
@@ -158,6 +158,8 @@ class Studio:
         self.override = Path(args.web).resolve() if args.web else None
         self.proposals = ProposalManager(cfg, manage=not args.snapshot)
         self.claude_ok = bool(self.proposals.claude_path())
+        # 시안을 고칠 수 있는 AI CLI (보낼 곳 단추). 화면이 뜰 때 한 번 본다
+        self.agents = {a: bool(find_agent(a)) for a in AGENTS}
         self.ai = AIRunner(cfg)
         self.port = 0
 
@@ -304,7 +306,7 @@ def build_handler(st: Studio):
                 html = body.decode("utf-8", errors="replace")
             info = {"mode": cfg.mode, "modes": cfg.modes, "app": cfg.name, "version": VERSION, "requests": cfg.rel(cfg.requests_dir),
                     "ctx": "" if st.override else self._context(), "claude": st.claude_ok, "proposals": cfg.proposals, "snapshot": st.args.snapshot,
-                    "captures": cfg.rel(captures_dir(cfg)), "artifact": art}
+                    "captures": cfg.rel(captures_dir(cfg)), "artifact": art, "agents": st.agents}
             head = ('<link rel="stylesheet" href="/__studio/studio-fonts.css" />\n'
                     '<link rel="stylesheet" href="/__studio/studio.css" />\n')
             # 앱 스크립트가 다 돈 뒤 붙도록 body 끝에, defer 로 (defer 끼리는 문서 순서대로 돈다)
@@ -489,8 +491,11 @@ def build_handler(st: Studio):
                 queue = [Path(str(q)).name for q in (payload.get("queue") or [])][:30]
                 if any(not (cfg.requests_dir / f"{q}.json").is_file() for q in queue):
                     raise ValueError("목록의 저장본을 못 찾았어요.")
+                agent = str(payload.get("agent") or "claude")
+                if action == "start" and not st.agents.get(agent):
+                    raise ValueError("그 AI 명령을 이 컴퓨터에서 못 찾았어요.")
                 if action == "start":
-                    meta = pm.create(request, str(payload.get("title") or ""), queue)
+                    meta = pm.create(request, str(payload.get("title") or ""), queue, agent)
                     return self.send_json({"ok": True, "name": meta["name"]})
                 if action == "revise":
                     pm.revise(name, request, queue)
@@ -665,6 +670,9 @@ def main(argv: list[str] | None = None) -> None:
     print(f"앱 서버: {upstream}" if upstream else f"작업물: {cfg.web_root}" + (f" / {cfg.entry}" if cfg.entry else ""), flush=True)
     print(f"저장 위치: {cfg.requests_dir}", flush=True)
     print(f"시안 만들기(claude): {st.proposals.claude_path() or '없음 — 저장본을 직접 Claude Code 에 넘겨 주세요'}", flush=True)
+    others = [a for a in ("gemini", "codex") if st.agents.get(a)]
+    if others:
+        print(f"다른 AI 로 고치기: {', '.join(others)}", flush=True)
     if not args.no_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:

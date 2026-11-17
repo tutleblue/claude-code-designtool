@@ -675,8 +675,11 @@
      이어서 보내는 말은 같은 Claude 대화(--resume)로 간다. claude 가 없으면 모은 내용을 복사해 Claude Code 에 붙이게 한다. */
   const ctxProposal = () => (INFO.ctx ? S.proposals.find((p) => p.name === INFO.ctx) : null);
   const isBusy = (p) => !!p && (p.status === "running" || p.status === "queued");
-  // Claude CLI 가 바로 고칠 수 있나: claude 가 있고, 시안을 켜 두었고, 작업물이면 글자 파일(또는 폴더)일 때
-  const claudeCan = () => INFO.claude && INFO.proposals !== false && (!ART || ART.editable || !ART.file);
+  // AI CLI 가 바로 고칠 수 있나: 그 AI 가 이 컴퓨터에 있고, 시안을 켜 두었고, 작업물이면 글자 파일(또는 폴더)일 때
+  const AGENT_LABEL = { claude: "Claude", gemini: "Gemini", codex: "Codex" };
+  const agentsHere = () => Object.keys(AGENT_LABEL).filter((a) => (INFO.agents || { claude: INFO.claude })[a]);
+  const claudeCan = () => agentsHere().length && INFO.proposals !== false && (!ART || ART.editable || !ART.file);
+  const destAgent = () => (agentsHere().includes(S.dest) ? S.dest : agentsHere()[0]);
   const canRun = () => claudeCan() && S.dest !== "copy";
   function askHtml() {
     if (INFO.snapshot) return "";
@@ -703,10 +706,11 @@
     // 보낼 목록: 담아 둔 요청들. ↑ 를 누르면 담은 것 + 지금 것을 차례로 한 번에 보낸다
     const queue = S.queue.length ? `<div class="aq">${S.queue.map((q, i) => `<div class="aqi"><b>${i + 1}</b><span>${esc(q.title)}</span>
         <small>${esc(q.meta || "")}</small><button class="mini" data-q-del="${esc(q.id)}" title="빼기">✕</button></div>`).join("")}</div>` : "";
+    const who = p && p.agent ? AGENT_LABEL[p.agent] || "AI" : AGENT_LABEL[destAgent()] || "AI";
     const dest = claudeCan()
-      ? `<div class="seg dest"><button data-dest="claude" class="${S.dest !== "copy" ? "on" : ""}" title="Claude CLI 가 복사본을 바로 고쳐 보여 줘요">Claude</button><button data-dest="copy" class="${S.dest === "copy" ? "on" : ""}" title="모아서 복사 — 다른 AI 에 붙여 넣기">복사</button></div>`
+      ? `<div class="seg dest">${agentsHere().map((a) => `<button data-dest="${a}" class="${S.dest !== "copy" && destAgent() === a ? "on" : ""}" title="${AGENT_LABEL[a]} 가 복사본을 바로 고쳐 보여 줘요">${AGENT_LABEL[a]}</button>`).join("")}<button data-dest="copy" class="${S.dest === "copy" ? "on" : ""}" title="모아서 복사 — 다른 AI 에 붙여 넣기">복사</button></div>`
       : "";
-    const hint = busy ? "Claude 가 고치는 중이에요" : p ? "더 고칠 것을 말해 주세요" : canRun() ? "Claude에게 바로 말하기" : "할 말 (모아서 복사해요)";
+    const hint = busy ? `${who} 가 고치는 중이에요` : p ? `더 고칠 것을 말해 주세요 (${who})` : canRun() ? `${who}에게 바로 말하기` : "할 말 (모아서 복사해요)";
     const n = S.queue.length;
     return `<footer class="ask">${status}${queue}
       ${parts.length || dest ? `<div class="askmeta">${dest}<span>${parts.length ? `함께 보냄 · ${parts.join(" · ")}` : ""}</span></div>` : ""}
@@ -801,7 +805,7 @@
       const revise = !!p && !["applied", "discarded"].includes(p.status);
       const started = await postJson(`/__studio/proposal/${revise ? "revise" : "start"}`,
         revise ? { name: INFO.ctx, request: names[0], queue: names.slice(1) }
-          : { request: names[0], queue: names.slice(1), title: items[0].title });
+          : { request: names[0], queue: names.slice(1), title: items[0].title, agent: destAgent() });
       if (!started.ok) throw new Error(started.message || "Claude 에게 넘기지 못했어요");
       done();
       if (!revise) return setCtx(started.name, items.length > 1 ? `요청 ${items.length}개를 차례로 고쳐요` : "Claude 가 고치는 대로 화면이 새로 보여요");

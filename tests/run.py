@@ -569,6 +569,91 @@ def artifact_checks() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def agent_checks() -> None:
+    """Gemini·Codex CLI 로도 시안을 고친다: 시안 폴더 안에서만(작업 폴더·샌드박스), 캡처는 폴더 안으로 복사해 넘기고,
+    이어 말하기는 지난 회차 설명을 넣어 새로 띄우고, 보낼 목록도 차례로."""
+    import base64
+    sys.path.insert(0, str(ROOT / "tests"))
+    from fixtures import png
+
+    tmp = Path(tempfile.mkdtemp(prefix="studio-agent-"))
+    proc = None
+    try:
+        for name in ("serve.py", "studio.app.json"):
+            shutil.copy2(HELLO / name, tmp / name)
+        shutil.copytree(HELLO / "web", tmp / "web")
+        log = tmp / "agent.log"
+        fake = str(ROOT / "tests" / "fake_agent.py")
+        env = {**os.environ, "STUDIO_GEMINI": fake, "STUDIO_CODEX": fake, "FAKE_AGENT_LOG": str(log), "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "studio", "--app", str(tmp / "studio.app.json"),
+                                 "--project", str(tmp), "--no-open", "--port", "8961"], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+        url = ""
+        deadline = time.time() + 30
+        while time.time() < deadline and not url:
+            line = proc.stdout.readline()
+            if line.startswith("디자인 스튜디오") and "http://" in line:
+                url = line[line.index("http://"):].strip()
+        if not url:
+            return check("다른 AI: 스튜디오 띄우기", False)
+        with urllib.request.urlopen(url + "?frame=1") as r:
+            html = r.read().decode("utf-8")
+        check("다른 AI: 이 컴퓨터의 Gemini·Codex 를 보낼 곳으로 알림", '"gemini": true' in html and '"codex": true' in html)
+
+        _, shot = post(url + "__studio/capture", json.dumps({"data": "data:image/png;base64," + base64.b64encode(png(20, 10)).decode()}).encode())
+
+        def save(text: str) -> str:
+            data = {"title": text, "variants": [], "comments": [{"id": "m1", "n": 1, "kind": "fix", "text": text, "shot": {"id": shot.get("id"), "w": 20, "h": 10},
+                                                                 "anchor": {"path": "h1", "view": "page", "label": "h1"}, "at": {"x": 0, "y": 0}}]}
+            return post(url + "__studio/save", json.dumps({"data": data, "markdown": f"# 요청\n\n{text}\n"}).encode())[1]["name"]
+
+        def wait(name: str, rounds: int) -> dict:
+            for _ in range(60):
+                time.sleep(0.5)
+                with urllib.request.urlopen(url + "__studio/proposals") as r:
+                    items = json.loads(r.read())["items"]
+                p = next((x for x in items if x["name"] == name), {})
+                if p.get("status") in ("ready", "failed") and len(p.get("rounds") or []) >= rounds:
+                    return p
+            return p
+
+        s, res = post(url + "__studio/proposal/start", json.dumps({"request": save("요청 A"), "agent": "없는AI"}).encode())
+        check("다른 AI: 없는 AI 이름은 거절", s == 400, str(res.get("message")))
+        _, res = post(url + "__studio/proposal/start", json.dumps({"request": save("요청 A"), "agent": "codex"}).encode())
+        p = wait(res["name"], 1)
+        web = tmp / ".design-studio" / "proposals" / res["name"] / "web"
+        runs = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()] if log.is_file() else []
+        first = runs[0] if runs else {"args": [], "cwd": "", "prompt": ""}
+        a = first["args"]
+        check("Codex: 시안 폴더 안에서만 쓰게 (exec --sandbox workspace-write -C 시안 폴더)",
+              a[:3] == ["exec", "--sandbox", "workspace-write"] and a[a.index("-C") + 1] == str(web) and Path(first["cwd"]) == web, " ".join(a[:8]))
+        check("Codex: 캡처를 시안 폴더에 복사해 그림으로 붙임 (-i)", "-i" in a and ".studio-captures" in a[a.index("-i") + 1]
+              and (web / ".studio-captures").is_dir() and "요청 A" in first["prompt"])
+        check("Codex: 시안을 고치고 마지막 답(-o)을 화면에", p.get("status") == "ready" and "rgb(7, 8, 1)" in (web / "styles.css").read_text(encoding="utf-8")
+              and "1회차" in ((p.get("rounds") or [{}])[-1].get("result") or ""), str(p.get("status")))
+        post(url + "__studio/proposal/revise", json.dumps({"name": res["name"], "request": save("요청 B")}).encode())
+        wait(res["name"], 2)
+        runs = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
+        check("Codex: 이어 말하면 지난 회차 설명을 넣어 다시", len(runs) == 2 and "지난 1회차" in runs[1]["prompt"] and "요청 B" in runs[1]["prompt"])
+
+        _, res = post(url + "__studio/proposal/start", json.dumps({"request": save("요청 C"), "queue": [save("요청 D")], "agent": "gemini"}).encode())
+        p = wait(res["name"], 2)
+        runs = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
+        g = runs[2]["args"] if len(runs) > 2 else []
+        check("Gemini: 폴더 믿기·고치기만 허락으로 띄움 (--skip-trust --approval-mode auto_edit)",
+              g[:3] == ["--skip-trust", "--approval-mode", "auto_edit"] and "-p" in g, " ".join(g[:5]))
+        check("Gemini: 보낼 목록 2개를 차례로", len(runs) == 4 and "요청 D" in runs[3]["prompt"] and p.get("status") == "ready"
+              and len(p.get("rounds") or []) == 2, f"{len(runs)}번 · {p.get('status')}")
+    finally:
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> None:
     if WORK.exists():
         shutil.rmtree(WORK)
@@ -585,6 +670,7 @@ def main() -> None:
         proc.wait(10)
     capture_ask_checks()
     artifact_checks()
+    agent_checks()
     apply_checks()
     if name:
         snapshot_check(name)

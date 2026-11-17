@@ -28,12 +28,13 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from .claude_cli import find_claude, kill_tree, spawn
+from .claude_cli import AGENT_LABEL, AGENTS, find_agent, find_claude, kill_tree, spawn
 from .config import STUDIO_HOME, AppConfig, fill_check
 
 from .artifacts import CODE_EXT
 
 # 시안에 복사하는 글자 파일 (그림 등은 복사하지 않고 원본을 보여 준다). 작업물 모드의 글·코드·표도 여기 든다
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 TEXT_EXT = {".html", ".htm", ".js", ".css", ".json", ".svg", ".txt", ".md", ".markdown", ".csv", ".tsv"} | CODE_EXT
 ACTIVE = {"running", "queued"}
 
@@ -132,7 +133,7 @@ class ProposalManager:
         return out
 
     def _public(self, meta: dict) -> dict:
-        keep = ("name", "title", "status", "createdAt", "updatedAt", "error", "rounds", "applyReport", "cost")
+        keep = ("name", "title", "status", "createdAt", "updatedAt", "error", "rounds", "applyReport", "cost", "agent")
         pub = {k: meta.get(k) for k in keep}
         pub["queue"] = len(meta.get("queue") or [])
         pub["activity"] = (meta.get("activity") or [])[-12:]
@@ -183,7 +184,7 @@ class ProposalManager:
         return "\n".join(chunks)
 
     # ---------- 만들기·고치기 ----------
-    def create(self, request_stem: str, title: str = "", queue: list[str] | None = None) -> dict:
+    def create(self, request_stem: str, title: str = "", queue: list[str] | None = None, agent: str = "claude") -> dict:
         # 폴더 이름은 저장 시각(영문·숫자)만 쓴다. 이 이름이 claude 권한 인자에 들어가는데,
         # Windows 에서 claude.cmd 는 cmd.exe 를 거쳐 한글 인자가 코드페이지 때문에 깨질 수 있다.
         m = re.match(r"\d{8}-\d{6}", Path(request_stem).name)
@@ -206,6 +207,7 @@ class ProposalManager:
             "sessionId": str(uuid.uuid4()), "rounds": [], "activity": [], "cost": 0.0,
             # 보낼 목록: 이 회차가 끝나면 같은 대화(--resume)로 차례로 이어 보낼 요청들
             "queue": list(queue or []),
+            "agent": agent if agent in AGENTS else "claude",  # 이 시안을 고치는 AI. 회차마다 바꾸지 않는다
         }
         self.save(meta)
         self.run(name, request_stem, followup=False)
@@ -308,8 +310,10 @@ class ProposalManager:
         return cmd
 
     def run(self, name: str, request_stem: str, followup: bool) -> None:
-        claude = self.claude_path()
         meta = self.load(name)
+        if meta and meta.get("agent", "claude") != "claude":
+            return self._run_other(name, request_stem, meta)
+        claude = self.claude_path()
         if not claude:
             meta.update(status="failed", error="이 컴퓨터에서 claude 명령을 못 찾았어요. Claude Code 를 설치하거나 STUDIO_CLAUDE 에 경로를 적어 주세요.")
             self.save(meta)
@@ -351,7 +355,6 @@ class ProposalManager:
                         pass
 
     def _pump_inner(self, name: str, proc: subprocess.Popen, round_idx: int) -> None:
-        next_request = ""
         result: dict = {}
         tail: list[str] = []
         for raw in proc.stdout:
@@ -382,6 +385,18 @@ class ProposalManager:
                     meta["updatedAt"] = now_iso()
                     self.save(meta)
         proc.wait()
+        ok = bool(result) and not result.get("is_error") and result.get("subtype") == "success"
+        reason = result.get("subtype") or f"끝남 코드 {proc.returncode}"
+        if reason == "error_max_turns":
+            reason = "정해 둔 횟수 안에 끝내지 못했어요"
+        self._finish(name, proc, round_idx, ok, str(result.get("result") or "").strip(),
+                     float(result.get("total_cost_usd") or 0),
+                     f"Claude 작업이 실패했어요 ({reason}). " + (" / ".join(tail[-2:]) if tail and not result else ""))
+
+    def _finish(self, name: str, proc: subprocess.Popen, round_idx: int, ok: bool, result_text: str, cost: float,
+                error: str) -> None:
+        """한 회차를 끝낸다: 다 됨·실패·멈춤을 적고, 보낼 목록에 다음 요청이 있으면 같은 대화로 잇는다."""
+        next_request = ""
         with self.lock:
             if self.procs.get(name) is proc:  # 다음 회차가 이미 붙었으면 그것을 지우지 않는다
                 self.procs.pop(name, None)
@@ -394,14 +409,13 @@ class ProposalManager:
                 self.save(meta)
                 return
             rnd["finishedAt"] = now_iso()
-            cost = float(result.get("total_cost_usd") or 0)
             rnd["cost"] = cost
             meta["cost"] = round(float(meta.get("cost") or 0) + cost, 4)
+            rnd["result"] = result_text
             if meta.get("status") == "cancelled":
                 rnd["status"] = "cancelled"
-            elif result and not result.get("is_error") and result.get("subtype") == "success":
+            elif ok:
                 rnd["status"] = "ready"
-                rnd["result"] = str(result.get("result") or "").strip()
                 meta["status"] = "ready"
                 if meta.get("queue"):
                     # 보낼 목록의 다음 요청: 화면이 '다 됨' 으로 깜빡이지 않게 바로 '대기' 로 두고, 잠금 밖에서 띄운다
@@ -409,19 +423,119 @@ class ProposalManager:
                     meta["status"] = "queued"
             else:
                 rnd["status"] = "failed"
-                reason = result.get("subtype") or f"끝남 코드 {proc.returncode}"
-                if reason == "error_max_turns":
-                    reason = "정해 둔 횟수 안에 끝내지 못했어요"
-                rnd["result"] = str(result.get("result") or "").strip()
                 meta["status"] = "failed"
-                meta["error"] = f"Claude 작업이 실패했어요 ({reason}). " + (" / ".join(tail[-2:]) if tail and not result else "")
+                meta["error"] = error
                 if meta.get("queue"):
                     meta["error"] += f" 목록에 남은 요청 {len(meta['queue'])}개는 보내지 않았어요(저장본은 남아 있어요)."
                     meta["queue"] = []
             meta["updatedAt"] = now_iso()
             self.save(meta)
         if next_request:
-            self.run(name, next_request, followup=bool(meta.get("sessionStarted")))
+            self.run(name, next_request, followup=bool(meta.get("sessionStarted")) or meta.get("agent", "claude") != "claude")
+
+    # ---------- 다른 AI CLI (Gemini·Codex) ----------
+    # Claude 처럼 세밀한 허락 목록이 없어서, '그 AI 를 시안 폴더 안에서 띄우고 그 폴더만 고치게' 묶는다.
+    #   gemini  --approval-mode auto_edit : 고치기만 저절로 허락, 셸 명령은 묻는데 화면이 없으니 하지 못한다. 작업 공간 = 시안 폴더
+    #   codex   exec --sandbox workspace-write : 쓰기는 작업 폴더(-C 시안 폴더) 안만
+    # 요청 글·캡처는 시안 폴더 밖이라 못 읽는다 → 요청 글은 프롬프트에 넣고, 캡처는 시안 폴더의 .studio-captures/ 에 복사한다.
+    # 대화를 이어 갈 방법이 CLI 마다 달라서, 회차마다 새로 띄우고 지난 회차 설명을 프롬프트에 넣는다.
+    def _other_prompt(self, name: str, request_stem: str, meta: dict, shots: list[str]) -> str:
+        cfg = self.cfg
+        req = (self.requests_dir / f"{request_stem}.md")
+        body = _read(req) or "(요청 글을 읽지 못했어요)"
+        before = [r for r in meta.get("rounds") or [] if r.get("result")][-3:]
+        history = "".join(f"\n### 지난 {i + 1}회차에 네가 한 일\n{r['result'][:1200]}\n" for i, r in enumerate(before))
+        what = "작업물" if cfg.artifact else "웹 화면"
+        context = cfg.context_text(3000)
+        shot_line = ("\n- 사용자가 찍은 캡처 그림: " + ", ".join(f"`{s}`" for s in shots) + " — 열어서 가리킨 곳을 확인한다.") if shots else ""
+        rules = ("\n## 앱 규칙\n" + context) if context else ""  # f-문자열 안에 \ 를 쓰면 파이썬 3.11 이하에서 문법 오류
+        return f"""지금 폴더는 '{cfg.name}' {what}의 복사본(시안)이다. 아래 요청대로 이 폴더의 파일을 고친다.
+
+지킬 것
+- 이 폴더 안의 파일만 고친다. 셸 명령은 쓰지 않는다. 사용자가 고친 결과를 보고 반영할지 정한다.
+- 요청의 '덮어쓰기 CSS' 를 그대로 붙이지 말고 원래 규칙·토큰을 고친다. 위치(줄·문단·칸)가 적혀 있으면 그 원본을 고친다.{shot_line}
+- 마지막 답은 사용자 화면에 그대로 보인다. 한국어로 짧게: 한 일(번호별 한 줄), 못 한 것과 이유.
+{rules}{history}
+## 이번 요청
+
+{body}
+"""
+
+    def _run_other(self, name: str, request_stem: str, meta: dict) -> None:
+        agent = meta.get("agent")
+        exe = find_agent(agent)
+        label = AGENT_LABEL.get(agent, agent)
+        if not exe:
+            meta.update(status="failed", error=f"이 컴퓨터에서 {label} 명령을 못 찾았어요. 설치하거나 STUDIO_{agent.upper()} 에 경로를 적어 주세요.")
+            self.save(meta)
+            return
+        web = self.web_dir(name)
+        # 이번 요청에 붙은 캡처를 시안 폴더 안으로 (그 AI 는 시안 폴더 밖을 못 읽는다)
+        shots = []
+        try:
+            data = json.loads((self.requests_dir / f"{request_stem}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        for c in data.get("comments") or []:
+            sid = str((c.get("shot") or {}).get("id") or "")
+            src = self.cfg.work_dir / "captures" / f"{sid}.png"
+            if re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", sid) and src.is_file():
+                (web / ".studio-captures").mkdir(exist_ok=True)
+                shutil.copy2(src, web / ".studio-captures" / src.name)
+                shots.append(f".studio-captures/{src.name}")
+        meta["status"] = "running"
+        meta["error"] = ""
+        meta["activity"] = (meta.get("activity") or []) + [f"── {len(meta['rounds']) + 1}회차 시작 ({label}): {request_stem}"]
+        meta["rounds"].append({"request": request_stem, "startedAt": now_iso(), "status": "running", "agent": agent})
+        meta["updatedAt"] = now_iso()
+        self.save(meta)
+        prompt = self._other_prompt(name, request_stem, meta, shots)
+        last = self.dir(name) / f"last-message-{len(meta['rounds'])}.txt"
+        if agent == "gemini":
+            # --skip-trust: 처음 보는 폴더(시안 폴더)는 믿지 않아 auto_edit 가 '묻기' 로 돌아가고, 화면이 없으니 아무것도 못 고쳤다 (실측)
+            args = ["--skip-trust", "--approval-mode", "auto_edit", "-p", "Do the request given on stdin. Edit only files in the current folder."]
+            if os.environ.get("STUDIO_GEMINI_MODEL"):
+                args += ["-m", os.environ["STUDIO_GEMINI_MODEL"]]
+        else:
+            args = ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-C", str(web), "-o", str(last)]
+            if os.environ.get("STUDIO_CODEX_MODEL"):
+                args += ["-m", os.environ["STUDIO_CODEX_MODEL"]]
+            args.append("-")
+            if shots:
+                args += ["-i", *(str(web / s) for s in shots)]
+        try:
+            proc = spawn(args, prompt, web, exe=exe)
+        except OSError as exc:
+            meta["status"] = "failed"
+            meta["error"] = f"{label} 를 실행하지 못했어요 ({exc.strerror or exc})."
+            meta["rounds"][-1].update(status="failed", finishedAt=now_iso())
+            self.save(meta)
+            return
+        with self.lock:
+            self.procs[name] = proc
+        threading.Thread(target=self._pump_other, args=(name, proc, len(meta["rounds"]) - 1, label, last), daemon=True).start()
+
+    def _pump_other(self, name: str, proc: subprocess.Popen, round_idx: int, label: str, last: Path) -> None:
+        tail: list[str] = []
+        try:
+            for raw in proc.stdout:
+                line = ANSI.sub("", raw).strip()
+                if not line:
+                    continue
+                tail = (tail + [line[:400]])[-40:]
+                with self.lock:
+                    meta = self.load(name)
+                    if not meta:
+                        continue
+                    meta["activity"] = ((meta.get("activity") or []) + ["💬 " + line[:160]])[-200:]
+                    meta["updatedAt"] = now_iso()
+                    self.save(meta)
+            proc.wait()
+        except Exception:  # noqa: BLE001 — 출력을 못 읽어도 회차는 끝낸다
+            kill_tree(proc)
+        said = _read(last).strip() if last.is_file() else "\n".join(tail[-12:])
+        self._finish(name, proc, round_idx, proc.returncode == 0, said, 0.0,
+                     f"{label} 작업이 실패했어요 (끝남 코드 {proc.returncode}). " + " / ".join(tail[-2:]))
 
     @staticmethod
     def _describe(ev: dict) -> list[str]:
