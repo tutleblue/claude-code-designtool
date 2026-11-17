@@ -1,0 +1,6 @@
+{
+  "name": "Hello",
+  "webRoot": "web",
+  "launch": ["{python}", "{config_dir}/serve.py", "--port", "{port}"],
+  "checks": ["node --check {web}/app.js"]
+}
