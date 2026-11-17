@@ -5,7 +5,8 @@
 - **오른쪽 단추 메뉴**: 요소마다 고르기·댓글·캡처·글자·색·크기·숨기기·되돌리기를 한 번에 합니다.
 - **캡처**: 화면을 끌어 그림으로 찍고 메모를 답니다. 댓글과 함께 모였다가 한 번에 Claude에게 갑니다.
 - **작업물 모드**: `run_studio.py open <파일·폴더>` 만 하면 형식을 알아보고 댓글 달 수 있는 화면으로 띄웁니다(개인화 필요 없음). 파일 없이 열면 끌어 놓아 첨부합니다. 댓글마다 원본 위치(몇째 줄·문단·슬라이드·칸·쪽·초)가 붙습니다.
-- **보낼 목록**: 요청을 **＋ 담기**로 여러 개 모아 한 번에 보냅니다. Claude는 같은 대화에서 하나씩 차례로 고칩니다. 보낼 곳은 **Claude**(바로 고침) 또는 **복사**(다른 AI에 붙여 넣기).
+- **보낼 목록**: 요청을 **＋ 담기**로 여러 개 모아 한 번에 보냅니다. AI는 하나씩 차례로 고칩니다.
+- **보낼 곳**: 이 컴퓨터에 있는 **Claude · Gemini · Codex** CLI 중 하나가 복사본을 바로 고칩니다. 또는 **복사**해서 아무 AI 채팅에나 붙여 넣습니다.
 - **바로 말하기**: 패널 아래 칸에 할 말을 적고 Enter. 댓글·캡처·바꾼 것이 함께 Claude CLI로 가고, Claude가 고치는 대로 화면이 새로 보입니다. 이어 말하면 같은 대화로 더 고칩니다.
 - **만지기**: 색(그라데이션 판·스포이트), 테마, 글자 크기·굵기, 간격, 모서리, 위치(끌어 옮기기), 크기, 순서, 글자
 - **단추 동작**: 누를 때 일어날 단계를 짜고 시연합니다. 지금 동작은 AI가 코드에서 찾아 줍니다.
@@ -56,7 +57,7 @@ python <도구>/run_studio.py open                    # 받은 편지함 (끌어
 python <도구>/run_studio.py snapshot <저장본>       # (앱 폴더에서) 지금 / 요청한 모습 사진
 ```
 
-시안 만들기와 AI 추천에는 [Claude Code](https://claude.com/claude-code) CLI(`claude`)가 필요합니다. 사진과 점검에는 Playwright(Chromium)가 필요합니다.
+시안 만들기에는 [Claude Code](https://claude.com/claude-code)(`claude`), [Gemini CLI](https://github.com/google-gemini/gemini-cli)(`gemini`), [Codex CLI](https://github.com/openai/codex)(`codex`) 중 하나가 필요합니다(AI 추천은 `claude`). 경로는 `STUDIO_CLAUDE`·`STUDIO_GEMINI`·`STUDIO_CODEX`로 바꿀 수 있습니다. 사진과 점검에는 Playwright(Chromium)가 필요합니다.
 
 ## 개인화 — 앱마다 다른 것
 
@@ -79,6 +80,7 @@ python <도구>/run_studio.py snapshot <저장본>       # (앱 폴더에서) �
 - **스튜디오 API 보호**: 루프백 호스트만 받습니다. JSON이 아닌 POST는 거절합니다(CSRF). `X-Frame-Options: SAMEORIGIN`을 붙입니다.
 - **저장본 검사**: 저장본과 AI 추천 값은 화면에 넣기 전에 거릅니다(XSS·CSS 주입).
 - **캡처**: 그림은 PNG·JPEG 인지 확인하고 `<앱>/.design-studio/captures/`에만 둡니다. 정해진 모양의 이름으로만 읽습니다. 화면 공유는 캡처 모드에 있는 동안만 켜 둡니다.
+- **시안을 만드는 Gemini·Codex**: 시안 폴더를 작업 폴더로 띄워 그 안만 고치게 합니다. Gemini는 `--approval-mode auto_edit`(셸 명령은 못 함), Codex는 `exec --sandbox workspace-write`. 캡처는 시안 폴더 안으로 복사해 넘깁니다.
 - **시안을 만드는 Claude**:
   - `dontAsk`로 띄웁니다.
   - 쓰기는 시안 폴더에만 허락합니다. 진짜 화면 폴더 쓰기는 거부 규칙으로 막습니다.
@@ -89,7 +91,7 @@ python <도구>/run_studio.py snapshot <저장본>       # (앱 폴더에서) �
 ## 시험
 
 ```bash
-python tests/run.py   # 50개 항목: 예제 앱(examples/hello), 작업물 형식별(tests/fixtures.py), 캡처·보낼 목록은 가짜 claude 로
+python tests/run.py   # 58개 항목: 예제 앱(examples/hello), 작업물 형식별(tests/fixtures.py), 캡처·보낼 목록은 가짜 claude 로
 ```
 
 ## 폴더
@@ -99,6 +101,6 @@ python tests/run.py   # 50개 항목: 예제 앱(examples/hello), 작업물 형�
 | `skill/tutleblue-design-studio/SKILL.md` | 시작 스킬 (세션에 넣거나 `~/.claude/skills`에 설치) |
 | `skill/GUIDE.md` | Claude용 안내서: 개인화·열기·저장본 반영·시안 모드·업데이트 |
 | `run_studio.py` | 어디서든 부르는 입구 |
-| `studio/` | `server.py`(셸·프록시·API), `config.py`, `artifacts.py`(작업물 형식 알아보기·보기 화면), `init.py`(앱 분석), `doctor.py`(점검), `proposals.py`(시안·보낼 목록), `ai.py`, `snapshot.py`, `assets/`(편집 도구·글꼴 OFL) |
+| `studio/` | `server.py`(셸·프록시·API), `config.py`, `artifacts.py`(작업물 형식 알아보기·보기 화면), `claude_cli.py`(AI CLI 찾기·띄우기), `init.py`(앱 분석), `doctor.py`(점검), `proposals.py`(시안·보낼 목록), `ai.py`, `snapshot.py`, `assets/`(편집 도구·글꼴 OFL) |
 | `templates/` | 런처 틀 |
 | `examples/hello/` | 시험용 예제 앱 |
